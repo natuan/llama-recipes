@@ -2,47 +2,32 @@
 # This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
 
 import os
-from pkg_resources import packaging
 
 import fire
 import torch
 import torch.distributed as dist
 import torch.optim as optim
 from peft import get_peft_model, prepare_model_for_int8_training
-from torch.distributed.fsdp import (
-    FullyShardedDataParallel as FSDP,
-)
+from pkg_resources import packaging
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp.fully_sharded_data_parallel import CPUOffload
 from torch.optim.lr_scheduler import StepLR
 from torch.utils.data import DistributedSampler
-from transformers import (
-    LlamaForCausalLM,
-    LlamaTokenizer,
-    LlamaConfig,
-    default_data_collator,
-)
+from transformers import (LlamaConfig, LlamaForCausalLM, LlamaTokenizer,
+                          default_data_collator)
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer
 
 from llama_recipes.configs import fsdp_config, train_config
 from llama_recipes.policies import AnyPrecisionAdamW, apply_fsdp_checkpointing
-
 from llama_recipes.utils import fsdp_auto_wrap_policy
-from llama_recipes.utils.config_utils import (
-    update_config,
-    generate_peft_config,
-    generate_dataset_config,
-)
+from llama_recipes.utils.config_utils import (generate_dataset_config,
+                                              generate_peft_config,
+                                              update_config)
 from llama_recipes.utils.dataset_utils import get_preprocessed_dataset
-
-from llama_recipes.utils.train_utils import (
-    train,
-    freeze_transformer_layers,
-    setup,
-    setup_environ_flags,
-    clear_gpu_cache,
-    print_model_size,
-    get_policies
-)
+from llama_recipes.utils.train_utils import (clear_gpu_cache,
+                                             freeze_transformer_layers,
+                                             get_policies, print_model_size,
+                                             setup, setup_environ_flags, train)
 
 
 def main(**kwargs):
@@ -65,8 +50,15 @@ def main(**kwargs):
         clear_gpu_cache(local_rank)
         setup_environ_flags(rank)
 
+    if rank == 0:
+        import wandb
+        # wandb.init(project='tuan-llama2-gsm8k',
+        #            group=train_config.dist_checkpoint_folder)
+        wandb.init(project='tuan-llama2-gsm8k')
+
     # Load the pre-trained model and setup its configuration
     use_cache = False if train_config.enable_fsdp else None
+    import pdb; pdb.set_trace()
     if train_config.enable_fsdp and train_config.low_cpu_fsdp:
         """
         for FSDP, we can save cpu memory by loading pretrained model on rank0 only.
@@ -77,8 +69,10 @@ def main(**kwargs):
         v = packaging.version.parse(torch.__version__)
         verify_latest_nightly = v.is_devrelease and v.dev >= 20230701
         if not verify_latest_nightly:
-            raise Exception("latest pytorch nightly build is required to run with low_cpu_fsdp config, "
-                            "please install latest nightly.")
+            raise Exception(
+                "latest pytorch nightly build is required to run with low_cpu_fsdp config, "
+                "please install latest nightly."
+            )
         if rank == 0:
             model = LlamaForCausalLM.from_pretrained(
                 train_config.model_name,
@@ -102,14 +96,17 @@ def main(**kwargs):
     if train_config.enable_fsdp and train_config.use_fast_kernels:
         """
         For FSDP and FSDP+PEFT, setting 'use_fast_kernels' will enable
-        using of Flash Attention or Xformer memory-efficient kernels 
+        using of Flash Attention or Xformer memory-efficient kernels
         based on the hardware being used. This would speed up fine-tuning.
         """
         try:
             from optimum.bettertransformer import BetterTransformer
-            model = BetterTransformer.transform(model) 
+
+            model = BetterTransformer.transform(model)
         except ImportError:
-            print("Module 'optimum' not found. Please install 'optimum' it before proceeding.")
+            print(
+                "Module 'optimum' not found. Please install 'optimum' it before proceeding."
+            )
     print_model_size(model, train_config, rank if train_config.enable_fsdp else 0)
 
     # Prepare the model for int8 training if quantization is enabled
@@ -123,20 +120,18 @@ def main(**kwargs):
     # Load the tokenizer and add special tokens
     tokenizer = LlamaTokenizer.from_pretrained(train_config.model_name)
     tokenizer.add_special_tokens(
-            {
-
-                "pad_token": "<PAD>",
-            }
-        )
+        {
+            "pad_token": "<PAD>",
+        }
+    )
     if train_config.use_peft:
         peft_config = generate_peft_config(train_config, kwargs)
         model = get_peft_model(model, peft_config)
         model.print_trainable_parameters()
 
-    #setting up FSDP if enable_fsdp is enabled
+    # setting up FSDP if enable_fsdp is enabled
     if train_config.enable_fsdp:
         if not train_config.use_peft and train_config.freeze_layers:
-
             freeze_transformer_layers(train_config.num_freeze_layers)
 
         mixed_precision_policy, wrapping_policy = get_policies(fsdp_config, rank)
@@ -144,15 +139,24 @@ def main(**kwargs):
 
         model = FSDP(
             model,
-            auto_wrap_policy= my_auto_wrapping_policy if train_config.use_peft else wrapping_policy,
-            cpu_offload=CPUOffload(offload_params=True) if fsdp_config.fsdp_cpu_offload else None,
-            mixed_precision=mixed_precision_policy if not fsdp_config.pure_bf16 else None,
+            auto_wrap_policy=my_auto_wrapping_policy
+            if train_config.use_peft
+            else wrapping_policy,
+            cpu_offload=CPUOffload(offload_params=True)
+            if fsdp_config.fsdp_cpu_offload
+            else None,
+            mixed_precision=mixed_precision_policy
+            if not fsdp_config.pure_bf16
+            else None,
             sharding_strategy=fsdp_config.sharding_strategy,
             device_id=torch.cuda.current_device(),
             limit_all_gathers=True,
             sync_module_states=train_config.low_cpu_fsdp,
-            param_init_fn=lambda module: module.to_empty(device=torch.device("cuda"), recurse=False)
-            if train_config.low_cpu_fsdp and rank != 0 else None,
+            param_init_fn=lambda module: module.to_empty(
+                device=torch.device("cuda"), recurse=False
+            )
+            if train_config.low_cpu_fsdp and rank != 0
+            else None,
         )
         if fsdp_config.fsdp_activation_checkpointing:
             apply_fsdp_checkpointing(model)
@@ -161,7 +165,7 @@ def main(**kwargs):
 
     dataset_config = generate_dataset_config(train_config, kwargs)
 
-     # Load and preprocess the dataset for training and validation
+    # Load and preprocess the dataset for training and validation
     dataset_train = get_preprocessed_dataset(
         tokenizer,
         dataset_config,
@@ -177,7 +181,7 @@ def main(**kwargs):
         split="test",
     )
     if not train_config.enable_fsdp or rank == 0:
-            print(f"--> Validation Set Length = {len(dataset_val)}")
+        print(f"--> Validation Set Length = {len(dataset_val)}")
 
     train_sampler = None
     val_sampler = None
@@ -250,8 +254,9 @@ def main(**kwargs):
         local_rank if train_config.enable_fsdp else None,
         rank if train_config.enable_fsdp else None,
     )
-    if not train_config.enable_fsdp or rank==0:
-        [print(f'Key: {k}, Value: {v}') for k, v in results.items()]
+    if not train_config.enable_fsdp or rank == 0:
+        [print(f"Key: {k}, Value: {v}") for k, v in results.items()]
+
 
 if __name__ == "__main__":
     fire.Fire(main)
