@@ -1,7 +1,7 @@
 #!/bin/bash
 
-export CUDA_VISIBLE_DEVICES=4,5,6,7
-NPROC=4
+export CUDA_VISIBLE_DEVICES=4
+NPROC=1
 
 source $HOME/src/natuan/llama-recipes/my_scripts/start_here.sh
 
@@ -14,25 +14,26 @@ DIST_MODEL_ROOT=$HOME/models/base_finetuned_search
 LR_SCHED=linear
 WARM=0.1
 
-for EPOCHS in 3
+for EPOCHS in 1
 do
-    export WANDB_RUN_GROUP="Hyperparam Search (Test as Dev) - Epochs $EPOCHS, No Grad Clip"
-    for LR in 1e-5 2e-5 3e-5
+    for LR in 1e-5
     do
-	for BS in 16
+	for BS in 8
 	do
-	    for WD in 0.0
+	    export WANDB_RUN_GROUP="Hyperparam Search (Dev from Train) - Epochs $EPOCHS, LR $LS, Batch $BS"
+	    for SEED in 53 241
 	    do
-		DIST_MODEL_FT=$MODEL_NAME@gsm8k@lr$LR@B$BS@W$WARM@WD$WD@ep$EPOCHS@GPUs$NPROC
+		DIST_MODEL_FT=$MODEL_NAME@gsm8k@lr$LR@B$BS@W$WARM@ep$EPOCHS@GPUs$NPROC@SEED$SEED
 		export WANDB_NAME=$DIST_MODEL_FT
 		torchrun --nnodes 1 --nproc_per_node $NPROC examples/finetuning.py \
 			 --dataset gsm8k_dataset \
 			 --num_epochs $EPOCHS \
+			 --test_as_dev 0 \
+			 --dev_set_seed $SEED \
 			 --lr $LR \
 			 --lr_scheduler $LR_SCHED \
 			 --warmup_ratio $WARM \
 			 --batch_size_training $BS \
-			 --weight_decay $WD \
 			 --enable_fsdp \
 			 --pure_bf16 \
 			 --model_name $SRC_MODEL \

@@ -168,6 +168,8 @@ def main(**kwargs):
         tokenizer,
         dataset_config,
         split="train",
+        test_as_dev=train_config.test_as_dev,
+        dev_set_seed=train_config.dev_set_seed
     )
     if not train_config.enable_fsdp or rank == 0:
         print(f"--> Training Set Length = {len(dataset_train)}")
@@ -176,6 +178,8 @@ def main(**kwargs):
         tokenizer,
         dataset_config,
         split="test",
+        test_as_dev=train_config.test_as_dev,
+        dev_set_seed=train_config.dev_set_seed
     )   
     if not train_config.enable_fsdp or rank == 0:
         print(f"--> Validation Set Length = {len(dataset_val)}")

@@ -3,31 +3,26 @@ import torch
 import datasets
 from llama_recipes.datasets.utils import Concatenator
 
-TEST_MODE = True
-
-SEED = 2023
-
-NEED_DEV_SET = False
-
-use_concat = False
+DEFAULT_SEED = 2023
+TEST_SIZE = 1319
 
 IGNORE_INDEX = -100  # The default setting in CrossEntropyLoss
 
-def get_preprocessed_gsm8k(dataset_config, tokenizer, split):
+def get_preprocessed_gsm8k(dataset_config, tokenizer, split="train", test_as_dev=False, dev_set_seed=DEFAULT_SEED):
     if split == "train":
         dataset = datasets.load_dataset("gsm8k", "main", split="train")
-        if NEED_DEV_SET:
+        if not test_as_dev:
             print("Reducing training set")
-            split_ds = dataset.train_test_split(test_size=1319, seed=SEED)
+            split_ds = dataset.train_test_split(test_size=TEST_SIZE, seed=dev_set_seed)
             dataset = split_ds.pop("train")
     elif split == "test":
-        if TEST_MODE:
+        if test_as_dev:
             print("Using the real test set")
             dataset = datasets.load_dataset("gsm8k", "main", split="test")
         else:
             print("Using a portion of the training set for validation")
             dataset = datasets.load_dataset("gsm8k", "main", split="train")
-            split_ds = dataset.train_test_split(test_size=1319, seed=SEED)
+            split_ds = dataset.train_test_split(test_size=TEST_SIZE, seed=dev_set_seed)
             dataset = split_ds.pop("test")
     else:
         raise ValueError("Unknow split type")

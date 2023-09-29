@@ -22,6 +22,8 @@ class train_config:
     warmup_ratio: float=0.1
     weight_decay: float=0.0
     gamma: float= 0.85
+    dev_set_seed: float=2023
+    test_as_dev: bool=True
     seed: int=42
     use_fp16: bool=False
     mixed_precision: bool=True
