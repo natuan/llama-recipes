@@ -42,4 +42,5 @@ class gsm8k_dataset:
     dataset: str =  "gsm8k_dataset"
     train_split: str = "train"
     test_split: str = "test"
-    input_length: int = 2048
+
+

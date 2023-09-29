@@ -14,7 +14,7 @@ from torch.distributed.fsdp.fully_sharded_data_parallel import CPUOffload
 from torch.optim.lr_scheduler import StepLR
 from torch.utils.data import DistributedSampler
 from transformers import (LlamaConfig, LlamaForCausalLM, LlamaTokenizer,
-                          default_data_collator)
+                          default_data_collator, get_scheduler)
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer
 
 from llama_recipes.configs import fsdp_config, train_config
@@ -52,13 +52,11 @@ def main(**kwargs):
 
     if rank == 0:
         import wandb
-        # wandb.init(project='tuan-llama2-gsm8k',
-        #            group=train_config.dist_checkpoint_folder)
-        wandb.init(project='tuan-llama2-gsm8k')
+        wandb.init(project='tuan-llama2-gsm8k-v2')
 
     # Load the pre-trained model and setup its configuration
     use_cache = False if train_config.enable_fsdp else None
-    import pdb; pdb.set_trace()
+
     if train_config.enable_fsdp and train_config.low_cpu_fsdp:
         """
         for FSDP, we can save cpu memory by loading pretrained model on rank0 only.
@@ -171,7 +169,6 @@ def main(**kwargs):
         dataset_config,
         split="train",
     )
-
     if not train_config.enable_fsdp or rank == 0:
         print(f"--> Training Set Length = {len(dataset_train)}")
 
@@ -179,7 +176,7 @@ def main(**kwargs):
         tokenizer,
         dataset_config,
         split="test",
-    )
+    )   
     if not train_config.enable_fsdp or rank == 0:
         print(f"--> Validation Set Length = {len(dataset_val)}")
 
@@ -238,7 +235,14 @@ def main(**kwargs):
             lr=train_config.lr,
             weight_decay=train_config.weight_decay,
         )
-    scheduler = StepLR(optimizer, step_size=1, gamma=train_config.gamma)
+    if train_config.lr_scheduler == 'step_lr':
+        scheduler = StepLR(optimizer, step_size=1, gamma=train_config.gamma)
+    else:
+        num_training_steps=len(train_dataloader)*train_config.num_epochs//train_config.gradient_accumulation_steps
+        num_warmup_steps = int(train_config.warmup_ratio * num_training_steps)
+        scheduler = get_scheduler(train_config.lr_scheduler, optimizer,
+                                  num_warmup_steps=num_warmup_steps,
+                                  num_training_steps=num_training_steps)
 
     # Start the training process
     results = train(

@@ -2,7 +2,7 @@
 
 export CUDA_VISIBLE_DEVICES=4,5,6,7
 
-source $HOME/src/facebookreseach/llama-recipes/my_scripts/start_here.sh
+source $HOME/src/natuan/llama-recipes/my_scripts/start_here.sh
 
 SRC_MODEL_DIR=$HOME/models
 MODEL_NAME=Llama-2-7b-hf
@@ -10,12 +10,12 @@ SRC_MODEL=$SRC_MODEL_DIR/$MODEL_NAME
 
 DIST_MODEL_ROOT=$HOME/models/base_finetuned
 
-for EPOCHS in 8
+for EPOCHS in 2
 do
     export WANDB_RUN_GROUP="Full training set - Epochs ${EPOCHS}"
     for LR in 1e-5
     do
-	for BS in 4
+	for BS in 16
 	do
 	    for WD in 0.0
 	    do

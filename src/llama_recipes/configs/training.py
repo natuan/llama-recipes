@@ -12,9 +12,14 @@ class train_config:
     run_validation: bool=True
     batch_size_training: int=4
     gradient_accumulation_steps: int=1
+    use_gradient_clipping: bool=False
+    gradient_clipping_thresh: float=1.0
+    max_position_embeddings: int=1024
     num_epochs: int=3
     num_workers_dataloader: int=1
     lr: float=1e-4
+    lr_scheduler: str="linear"
+    warmup_ratio: float=0.1
     weight_decay: float=0.0
     gamma: float= 0.85
     seed: int=42

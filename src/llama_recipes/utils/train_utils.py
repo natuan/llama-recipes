@@ -108,6 +108,8 @@ def train(
                     if (step + 1) % gradient_accumulation_steps == 0 or step == len(
                         train_dataloader
                     ) - 1:
+                        if train_config.use_gradient_clipping:
+                            torch.nn.utils.clip_grad_norm_(model.parameters(), train_config.gradient_clipping_thresh)
                         scaler.step(optimizer)
                         scaler.update()
                         optimizer.zero_grad()
@@ -118,9 +120,22 @@ def train(
                     if (step + 1) % gradient_accumulation_steps == 0 or step == len(
                         train_dataloader
                     ) - 1:
+                        if train_config.use_gradient_clipping:
+                            torch.nn.utils.clip_grad_norm_(model.parameters(), train_config.gradient_clipping_thresh)
                         optimizer.step()
                         optimizer.zero_grad()
                         pbar.update(1)
+
+                lr_scheduler.step()
+
+                if rank == 0:
+                    commit = step < len(train_dataloader) - 1
+                    wandb.log(
+                        {
+                            "lr": lr_scheduler.get_lr()[0],
+                        },
+                        commit = commit
+                    )
 
                 pbar.set_description(
                     f"Training Epoch: {epoch+1}/{train_config.num_epochs}, step {step}/{len(train_dataloader)} completed (loss: {loss.detach().float()})"
@@ -145,8 +160,8 @@ def train(
                 {
                     "train_epoch_loss": train_epoch_loss,
                     "train_perplexity": train_perplexity,
-                    "lr": lr_scheduler.get_lr()[0],
-                }
+                },
+                commit = not train_config.run_validation,
             )
 
         if train_config.enable_fsdp:
@@ -167,8 +182,9 @@ def train(
                 f"CPU Total Peak Memory consumed during the train (max): {memtrace.cpu_peaked + memtrace.cpu_begin} GB"
             )
 
+        # Tuan: Moved this into stepping each step
         # Update the learning rate as needed
-        lr_scheduler.step()
+        # lr_scheduler.step()
 
         if train_config.run_validation:
             eval_ppl, eval_epoch_loss = evaluation(
@@ -252,7 +268,8 @@ def train(
                     {
                         "eval_epoch_loss": eval_epoch_loss,
                         "eval_perplexity": eval_ppl,
-                    }
+                    },
+                    commit = True
                 )
 
         if train_config.enable_fsdp:
