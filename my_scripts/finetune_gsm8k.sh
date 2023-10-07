@@ -1,21 +1,23 @@
 #!/bin/bash
 
-export CUDA_VISIBLE_DEVICES=4,5,6,7
+export CUDA_VISIBLE_DEVICES=0,1,2,3
 
 source $HOME/src/natuan/llama-recipes/my_scripts/start_here.sh
 
-SRC_MODEL_DIR=$HOME/models
+MODEL_DIR=/data/models/tuan/llama
+
+SRC_MODEL_DIR=$MODEL_DIR
 MODEL_NAME=Llama-2-7b-hf
 SRC_MODEL=$SRC_MODEL_DIR/$MODEL_NAME
 
 DIST_MODEL_ROOT=$HOME/models/base_finetuned
 
-for EPOCHS in 2
+for EPOCHS in 1
 do
     export WANDB_RUN_GROUP="Full training set - Epochs ${EPOCHS}"
     for LR in 1e-5
     do
-	for BS in 16
+	for BS in 1
 	do
 	    for WD in 0.0
 	    do

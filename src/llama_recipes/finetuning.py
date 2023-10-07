@@ -24,6 +24,7 @@ from llama_recipes.utils.config_utils import (generate_dataset_config,
                                               generate_peft_config,
                                               update_config)
 from llama_recipes.utils.dataset_utils import get_preprocessed_dataset
+from llama_recipes.utils.loss import register_custom_loss
 from llama_recipes.utils.train_utils import (clear_gpu_cache,
                                              freeze_transformer_layers,
                                              get_policies, print_model_size,
@@ -52,7 +53,8 @@ def main(**kwargs):
 
     if rank == 0:
         import wandb
-        wandb.init(project='tuan-llama2-gsm8k-v2')
+
+        wandb.init(project="tuan-llama2-gsm8k-v2")
 
     # Load the pre-trained model and setup its configuration
     use_cache = False if train_config.enable_fsdp else None
@@ -91,6 +93,15 @@ def main(**kwargs):
             device_map="auto" if train_config.quantization else None,
             use_cache=use_cache,
         )
+
+    dataset_config = generate_dataset_config(train_config, kwargs)
+    if train_config.use_custom_loss and dataset_config.dataset == "gsm8k_dataset":
+        register_custom_loss(
+            model,
+            "GSM8K_AccuracyAwareLoss",
+            result_loss_weight=train_config.result_loss_weight,
+        )
+
     if train_config.enable_fsdp and train_config.use_fast_kernels:
         """
         For FSDP and FSDP+PEFT, setting 'use_fast_kernels' will enable
@@ -161,15 +172,13 @@ def main(**kwargs):
     elif not train_config.quantization and not train_config.enable_fsdp:
         model.to("cuda")
 
-    dataset_config = generate_dataset_config(train_config, kwargs)
-
     # Load and preprocess the dataset for training and validation
     dataset_train = get_preprocessed_dataset(
         tokenizer,
         dataset_config,
         split="train",
         test_as_dev=train_config.test_as_dev,
-        dev_set_seed=train_config.dev_set_seed
+        dev_set_seed=train_config.dev_set_seed,
     )
     if not train_config.enable_fsdp or rank == 0:
         print(f"--> Training Set Length = {len(dataset_train)}")
@@ -179,8 +188,8 @@ def main(**kwargs):
         dataset_config,
         split="test",
         test_as_dev=train_config.test_as_dev,
-        dev_set_seed=train_config.dev_set_seed
-    )   
+        dev_set_seed=train_config.dev_set_seed,
+    )
     if not train_config.enable_fsdp or rank == 0:
         print(f"--> Validation Set Length = {len(dataset_val)}")
 
@@ -239,14 +248,21 @@ def main(**kwargs):
             lr=train_config.lr,
             weight_decay=train_config.weight_decay,
         )
-    if train_config.lr_scheduler == 'step_lr':
+    if train_config.lr_scheduler == "step_lr":
         scheduler = StepLR(optimizer, step_size=1, gamma=train_config.gamma)
     else:
-        num_training_steps=len(train_dataloader)*train_config.num_epochs//train_config.gradient_accumulation_steps
+        num_training_steps = (
+            len(train_dataloader)
+            * train_config.num_epochs
+            // train_config.gradient_accumulation_steps
+        )
         num_warmup_steps = int(train_config.warmup_ratio * num_training_steps)
-        scheduler = get_scheduler(train_config.lr_scheduler, optimizer,
-                                  num_warmup_steps=num_warmup_steps,
-                                  num_training_steps=num_training_steps)
+        scheduler = get_scheduler(
+            train_config.lr_scheduler,
+            optimizer,
+            num_warmup_steps=num_warmup_steps,
+            num_training_steps=num_training_steps,
+        )
 
     # Start the training process
     results = train(

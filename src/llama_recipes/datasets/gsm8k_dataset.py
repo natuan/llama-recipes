@@ -1,14 +1,22 @@
 import copy
+
 import torch
+
 import datasets
-from llama_recipes.datasets.utils import Concatenator
 
 DEFAULT_SEED = 2023
 TEST_SIZE = 1319
 
 IGNORE_INDEX = -100  # The default setting in CrossEntropyLoss
 
-def get_preprocessed_gsm8k(dataset_config, tokenizer, split="train", test_as_dev=False, dev_set_seed=DEFAULT_SEED):
+
+def get_preprocessed_gsm8k(
+    dataset_config,
+    tokenizer,
+    split="train",
+    test_as_dev=False,
+    dev_set_seed=DEFAULT_SEED,
+):
     if split == "train":
         dataset = datasets.load_dataset("gsm8k", "main", split="train")
         if not test_as_dev:
@@ -36,14 +44,24 @@ def get_preprocessed_gsm8k(dataset_config, tokenizer, split="train", test_as_dev
             answer=sample["answer"],
             eos_token=tokenizer.eos_token,
         )
+
+        result_sep = "\n#### "
+        pos = example.rfind(result_sep)
+        if pos < 0:
+            raise RuntimeError("Assumption wrong on the result separator")
+        result_prefix = example[: (pos + len(result_sep))]
+
         prompt = torch.tensor(tokenizer.encode(prompt), dtype=torch.int64)
         example = torch.tensor(tokenizer.encode(example), dtype=torch.int64)
+        result_prefix = torch.tensor(tokenizer.encode(result_prefix), dtype=torch.int64)
+        eos_pos = len(example) - 1
+
         max_seq_len = 1024  # tokenizer.max_position_embeddings
         padding = max_seq_len - example.shape[0]
         if padding > 0:
             example = torch.cat((example, torch.zeros(padding, dtype=torch.int64) - 1))
         elif padding < 0:
-            example = example[: max_seq_len]
+            example = example[:max_seq_len]
         labels = copy.deepcopy(example)
         labels[: len(prompt)] = -1
         example_mask = example.ge(0)
@@ -53,11 +71,17 @@ def get_preprocessed_gsm8k(dataset_config, tokenizer, split="train", test_as_dev
         example_mask = example_mask.float()
         label_mask = label_mask.float()
 
+        result_mask = torch.ones_like(labels, dtype=torch.bool)
+        result_mask[: len(result_prefix)] = False
+        result_mask[eos_pos:] = False
+
         return {
             "input_ids": example,
             "labels": labels,
-            "attention_mask":example_mask,
+            "attention_mask": example_mask,
+            "result_mask": result_mask,
         }
+
     dataset = dataset.map(
         lambda sample: process_sample(sample),
         batched=False,

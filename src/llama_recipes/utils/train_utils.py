@@ -1,28 +1,26 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
-import wandb
 import os
 import time
-import yaml
 from pathlib import Path
-from pkg_resources import packaging
-
+from typing import Dict
 
 import torch
 import torch.cuda.nccl as nccl
 import torch.distributed as dist
+import wandb
+import yaml
+from pkg_resources import packaging
 from torch.distributed.fsdp import StateDictType
 from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
 from tqdm import tqdm
 from transformers import LlamaTokenizer
 
-
 from llama_recipes.model_checkpointing import (
-    save_model_checkpoint,
-    save_model_and_optimizer_sharded,
-    save_optimizer_checkpoint,
-)
-from llama_recipes.policies import fpSixteen, bfSixteen_mixed, get_llama_wrapper
+    save_model_and_optimizer_sharded, save_model_checkpoint,
+    save_optimizer_checkpoint)
+from llama_recipes.policies import (bfSixteen_mixed, fpSixteen,
+                                    get_llama_wrapper)
 from llama_recipes.utils.memory_utils import MemoryTrace
 
 
@@ -99,7 +97,10 @@ def train(
                         batch[key] = batch[key].to(local_rank)
                     else:
                         batch[key] = batch[key].to("cuda:0")
-                loss = model(**batch).loss
+                all_losses = model(**batch).loss
+                loss = (
+                    all_losses["loss"] if isinstance(all_losses, Dict) else all_losses
+                )
                 loss = loss / gradient_accumulation_steps
                 total_loss += loss.detach().float()
                 if train_config.use_fp16:
@@ -109,7 +110,10 @@ def train(
                         train_dataloader
                     ) - 1:
                         if train_config.use_gradient_clipping:
-                            torch.nn.utils.clip_grad_norm_(model.parameters(), train_config.gradient_clipping_thresh)
+                            torch.nn.utils.clip_grad_norm_(
+                                model.parameters(),
+                                train_config.gradient_clipping_thresh,
+                            )
                         scaler.step(optimizer)
                         scaler.update()
                         optimizer.zero_grad()
@@ -121,7 +125,10 @@ def train(
                         train_dataloader
                     ) - 1:
                         if train_config.use_gradient_clipping:
-                            torch.nn.utils.clip_grad_norm_(model.parameters(), train_config.gradient_clipping_thresh)
+                            torch.nn.utils.clip_grad_norm_(
+                                model.parameters(),
+                                train_config.gradient_clipping_thresh,
+                            )
                         optimizer.step()
                         optimizer.zero_grad()
                         pbar.update(1)
@@ -134,7 +141,7 @@ def train(
                         {
                             "lr": lr_scheduler.get_lr()[0],
                         },
-                        commit = commit
+                        commit=commit,
                     )
 
                 pbar.set_description(
@@ -161,7 +168,7 @@ def train(
                     "train_epoch_loss": train_epoch_loss,
                     "train_perplexity": train_perplexity,
                 },
-                commit = not train_config.run_validation,
+                commit=not train_config.run_validation,
             )
 
         if train_config.enable_fsdp:
@@ -269,7 +276,7 @@ def train(
                         "eval_epoch_loss": eval_epoch_loss,
                         "eval_perplexity": eval_ppl,
                     },
-                    commit = True
+                    commit=True,
                 )
 
         if train_config.enable_fsdp:
@@ -344,6 +351,7 @@ def evaluation(model, train_config, eval_dataloader, local_rank, tokenizer):
                 # Forward pass and compute loss
                 outputs = model(**batch)
                 loss = outputs.loss
+                loss = loss["loss"] if isinstance(loss, Dict) else loss
                 eval_loss += loss.detach().float()
             # Decode predictions and add to evaluation predictions list
             preds = torch.argmax(outputs.logits, -1)
