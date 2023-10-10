@@ -84,6 +84,12 @@ def train(
         with MemoryTrace() as memtrace:  # track the memory usage
             model.train()
             total_loss = 0.0
+
+            # GSM8K: Two specific losses from answers
+            if train_config.use_custom_loss:
+                total_chain_of_thought_loss = 0.0
+                total_result_loss = 0.0
+
             total_length = len(train_dataloader) // gradient_accumulation_steps
             pbar = tqdm(
                 colour="blue",
@@ -103,6 +109,15 @@ def train(
                 )
                 loss = loss / gradient_accumulation_steps
                 total_loss += loss.detach().float()
+
+                # GSM8K
+                if train_config.use_custom_loss:
+                    assert isinstance(all_losses, Dict)
+                    chain_of_thought_loss = all_losses["chain_of_thoughts_loss"] / gradient_accumulation_steps
+                    result_loss = all_losses["result_loss"] / gradient_accumulation_steps
+                    total_chain_of_thought_loss += chain_of_thought_loss.detach().float()
+                    total_result_loss += result_loss.detach().float()
+
                 if train_config.use_fp16:
                     # if fp16 is enabled, use gradient scaler to handle gradient update
                     scaler.scale(loss).backward()
@@ -154,9 +169,24 @@ def train(
         # Reducing total_loss across all devices if there's more than one CUDA device
         if torch.cuda.device_count() > 1 and train_config.enable_fsdp:
             dist.all_reduce(total_loss, op=dist.ReduceOp.SUM)
+
+            # GSM8K
+            dist.all_reduce(total_chain_of_thought_loss, op=dist.ReduceOp.SUM)
+            dist.all_reduce(total_result_loss, op=dist.ReduceOp.SUM)
+
         train_epoch_loss = total_loss / len(train_dataloader)
+
+        # GSM8K
+        train_epoch_chain_of_thought_loss = total_chain_of_thought_loss / len(train_dataloader)
+        train_epoch_result_loss = total_result_loss / len(train_dataloader)
+
         if train_config.enable_fsdp:
             train_epoch_loss = train_epoch_loss / world_size
+
+            # GSM8K
+            train_epoch_chain_of_thought_loss = train_epoch_chain_of_thought_loss / world_size
+            train_epoch_result_loss = train_epoch_result_loss / world_size
+
         train_perplexity = torch.exp(train_epoch_loss)
 
         train_prep.append(train_perplexity)
@@ -167,6 +197,8 @@ def train(
                 {
                     "train_epoch_loss": train_epoch_loss,
                     "train_perplexity": train_perplexity,
+                    "train_chain_of_thought_loss": train_epoch_chain_of_thought_loss,
+                    "train_result_loss": train_epoch_result_loss,
                 },
                 commit=not train_config.run_validation,
             )
@@ -194,9 +226,14 @@ def train(
         # lr_scheduler.step()
 
         if train_config.run_validation:
-            eval_ppl, eval_epoch_loss = evaluation(
-                model, train_config, eval_dataloader, local_rank, tokenizer
-            )
+            if train_config.use_custom_loss:
+                eval_ppl, eval_epoch_loss, eval_epoch_chain_of_thought_loss, eval_epoch_result_loss = evaluation(
+                    model, train_config, eval_dataloader, local_rank, tokenizer
+                )
+            else:
+                eval_ppl, eval_epoch_loss = evaluation(
+                    model, train_config, eval_dataloader, local_rank, tokenizer
+                )
             checkpoint_start_time = time.perf_counter()
             if train_config.save_model and eval_epoch_loss < best_val_loss:
                 if train_config.enable_fsdp:
@@ -275,6 +312,8 @@ def train(
                     {
                         "eval_epoch_loss": eval_epoch_loss,
                         "eval_perplexity": eval_ppl,
+                        "eval_epoch_chain_of_thought_loss": eval_epoch_chain_of_thought_loss,
+                        "eval_epoch_result_loss": eval_epoch_result_loss,
                     },
                     commit=True,
                 )
@@ -332,6 +371,12 @@ def evaluation(model, train_config, eval_dataloader, local_rank, tokenizer):
     model.eval()
     eval_preds = []
     eval_loss = 0.0  # Initialize evaluation loss
+
+    # GSM8K: Two specific losses from answers
+    if train_config.use_custom_loss:
+        eval_chain_of_thought_loss = 0.0
+        eval_result_loss = 0.0
+
     with MemoryTrace() as memtrace:
         for step, batch in enumerate(
             tqdm(
@@ -350,9 +395,20 @@ def evaluation(model, train_config, eval_dataloader, local_rank, tokenizer):
             with torch.no_grad():
                 # Forward pass and compute loss
                 outputs = model(**batch)
-                loss = outputs.loss
-                loss = loss["loss"] if isinstance(loss, Dict) else loss
+                all_losses = outputs.loss
+                loss = (
+                    all_losses["loss"] if isinstance(all_losses, Dict) else all_losses
+                )
                 eval_loss += loss.detach().float()
+
+                # GSM8K
+                if train_config.use_custom_loss:
+                    assert isinstance(all_losses, Dict)
+                    chain_of_thought_loss = all_losses["chain_of_thoughts_loss"]
+                    result_loss = all_losses["result_loss"]
+                    eval_chain_of_thought_loss += chain_of_thought_loss.detach().float()
+                    eval_result_loss += result_loss.detach().float()
+
             # Decode predictions and add to evaluation predictions list
             preds = torch.argmax(outputs.logits, -1)
             eval_preds.extend(
@@ -365,10 +421,24 @@ def evaluation(model, train_config, eval_dataloader, local_rank, tokenizer):
     if torch.cuda.device_count() > 1 and train_config.enable_fsdp:
         dist.all_reduce(eval_loss, op=dist.ReduceOp.SUM)
 
+        # GSM8K
+        dist.all_reduce(eval_chain_of_thought_loss, op=dist.ReduceOp.SUM)
+        dist.all_reduce(eval_result_loss, op=dist.ReduceOp.SUM)
+
     # Compute average loss and perplexity
     eval_epoch_loss = eval_loss / len(eval_dataloader)
+
+    # GSM8K
+    eval_epoch_chain_of_thought_loss = eval_chain_of_thought_loss / len(eval_dataloader)
+    eval_epoch_result_loss = eval_result_loss / len(eval_dataloader)
+
     if train_config.enable_fsdp:
         eval_epoch_loss = eval_epoch_loss / world_size
+
+        # GSM8K
+        eval_epoch_chain_of_thought_loss = eval_epoch_chain_of_thought_loss / world_size
+        eval_epoch_result_loss = eval_epoch_result_loss / world_size
+
     eval_ppl = torch.exp(eval_epoch_loss)
 
     # Print evaluation metrics
@@ -378,7 +448,10 @@ def evaluation(model, train_config, eval_dataloader, local_rank, tokenizer):
     else:
         print(f" {eval_ppl=} {eval_epoch_loss=}")
 
-    return eval_ppl, eval_epoch_loss
+    if train_config.use_custom_loss:
+        return eval_ppl, eval_epoch_loss, eval_epoch_chain_of_thought_loss, eval_epoch_result_loss
+    else:
+        return eval_ppl, eval_epoch_loss
 
 
 def freeze_transformer_layers(model, num_layer):
@@ -522,3 +595,28 @@ def save_train_params(train_config, fsdp_config, rank):
             f.write(config_yaml)
         if rank == 0:
             print(f"training params are saved in {file_name}")
+
+# # Support Sparse Training
+# @torch.no_grad()
+# def apply_masks(model):
+#     def mask_weights(module):
+#         if hasattr(module, 'mask'):
+#             # print("Weight shape: {}, mask shape: {}".format(module.weight.size(), module.mask.size()))
+#             module.weight *= module.mask
+#     model.apply(mask_weights)
+
+
+# def attach_masks(model, to_layer=torch.nn.Linear, debug=False):
+#     for name, module in model.named_children():
+#         # we should make this more specific to avoid masking of unpruned layers
+#         # e.g.: project_in and project_out in OPT models
+#         if isinstance(module, to_layer):
+#             ## Only for debugging purposes, set sparsity to 10%
+#             # module.weight.data[torch.rand_like(module.weight) < 0.10] = 0
+
+#             mask = torch.where(module.weight == 0, torch.tensor(0, dtype=torch.uint8), torch.tensor(1, dtype=torch.uint8))
+#             module.register_buffer("mask", mask, persistent=False)
+#             if debug:
+#                 print(f"[Debugging] attaching mask to {name} with sparsity = {torch.sum(mask == 0)/mask.numel()}")
+#         else:
+#             attach_masks(module, to_layer)
