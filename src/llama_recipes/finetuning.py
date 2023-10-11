@@ -28,7 +28,7 @@ from llama_recipes.utils.loss import register_custom_loss
 from llama_recipes.utils.train_utils import (clear_gpu_cache,
                                              freeze_transformer_layers,
                                              get_policies, print_model_size,
-                                             setup, setup_environ_flags, train)
+                                             setup, setup_environ_flags, train, attach_masks)
 
 
 def main(**kwargs):
@@ -44,7 +44,6 @@ def main(**kwargs):
         # torchrun specific
         local_rank = int(os.environ["LOCAL_RANK"])
         rank = int(os.environ["RANK"])
-        world_size = int(os.environ["WORLD_SIZE"])
 
     if torch.distributed.is_initialized():
         torch.cuda.set_device(local_rank)
@@ -54,7 +53,7 @@ def main(**kwargs):
     if rank == 0:
         import wandb
 
-        wandb.init(project="tuan-llama2-gsm8k-v2")
+        wandb.init(project="tuan-llama2-7b-gsm8k-custom_loss")
 
     # Load the pre-trained model and setup its configuration
     use_cache = False if train_config.enable_fsdp else None
@@ -137,6 +136,18 @@ def main(**kwargs):
         peft_config = generate_peft_config(train_config, kwargs)
         model = get_peft_model(model, peft_config)
         model.print_trainable_parameters()
+
+    # ============== Sparse training setup =================
+    if train_config.sparse_training:
+        if train_config.sparse_ckpt:
+            print(f"[Debugging] before FSDP is initialized, custom loading of the sparse checkpoint from {train_config.sparse_ckpt}")
+            sd = torch.load(train_config.sparse_ckpt, map_location='cpu')['state']['model']
+            sd = {key.replace('model.model.', 'model.').replace('model.lm_head.', 'lm_head.'): value for key, value in sd.items()}
+            model.load_state_dict(sd, strict=True)
+        if rank == 0:
+            for n, p in model.named_parameters():
+                print(f"[Debugging] loaded {n}, shape = {p.shape}, sparsity = {torch.sum(p == 0)/p.numel()}")
+        attach_masks(model, debug=rank==0)
 
     # setting up FSDP if enable_fsdp is enabled
     if train_config.enable_fsdp:

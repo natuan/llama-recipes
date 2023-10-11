@@ -1,15 +1,19 @@
 #!/bin/bash
 
-export CUDA_VISIBLE_DEVICES=4,5,6,7
-NPROC=4
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+NPROC=$(($(echo $CUDA_VISIBLE_DEVICES | grep -o "," | wc -l)+1))
 
 source $HOME/src/natuan/llama-recipes/my_scripts/start_here.sh
 
-SRC_MODEL_DIR=$HOME/models
+MODEL_DIR=/data/models/tuan/llama
+
+SRC_MODEL_ORG_OR_DIR=$MODEL_DIR
+
+SRC_MODEL_DIR=$MODEL_DIR
 MODEL_NAME=Llama-2-7b-hf
 SRC_MODEL=$SRC_MODEL_DIR/$MODEL_NAME
 
-DIST_MODEL_ROOT=$HOME/models/base_finetuned_search
+DIST_MODEL_ROOT=$MODEL_DIR/base_finetuned_search
 
 LR_SCHED=linear
 WARM=0.1
@@ -17,9 +21,9 @@ WARM=0.1
 for EPOCHS in 3
 do
     export WANDB_RUN_GROUP="Hyperparam Search (Test as Dev) - Epochs $EPOCHS, No Grad Clip"
-    for LR in 1e-5 2e-5 3e-5
+    for LR in 1e-5
     do
-	for BS in 16
+	for BS in 8
 	do
 	    for WD in 0.0
 	    do

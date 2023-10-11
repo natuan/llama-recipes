@@ -1,35 +1,45 @@
 #!/bin/bash
 
-export CUDA_VISIBLE_DEVICES=4
-NPROC=1
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+NPROC=$(($(echo $CUDA_VISIBLE_DEVICES | grep -o "," | wc -l)+1))
 
 source $HOME/src/natuan/llama-recipes/my_scripts/start_here.sh
 
-SRC_MODEL_DIR=$HOME/models
+MODEL_DIR=/data/models/tuan/llama
 MODEL_NAME=Llama-2-7b-hf
-SRC_MODEL=$SRC_MODEL_DIR/$MODEL_NAME
+SRC_MODEL=$MODEL_DIR/$MODEL_NAME
 
-DIST_MODEL_ROOT=$HOME/models/base_finetuned_search
+DIST_MODEL_ROOT=$MODEL_DIR/base_finetuned_search
 
 LR_SCHED=linear
 WARM=0.1
 
-for EPOCHS in 1
+GRAD_CLIP=1
+GRAD_THRES=1.0
+
+BS=8
+
+EPOCHS=3
+
+for SEED in 53 1223 241
 do
     for LR in 1e-5
     do
-	for BS in 8
+	for GRAD_ACC in 1 2
 	do
-	    export WANDB_RUN_GROUP="Hyperparam Search (Dev from Train) - Epochs $EPOCHS, LR $LS, Batch $BS"
-	    for SEED in 53 241
+	    export WANDB_RUN_GROUP="Custom vs Original Loss (Dev from Train) - Epochs $EPOCHS, LR $LR, Batch $BS, GradAccum $GRAD_ACC"
+	    for CUS_LOSS in 1 0
 	    do
-		DIST_MODEL_FT=$MODEL_NAME@gsm8k@lr$LR@B$BS@W$WARM@ep$EPOCHS@GPUs$NPROC@SEED$SEED
+		DIST_MODEL_FT=$MODEL_NAME@gsm8k@lr$LR@B$BS@W$WARM@ep$EPOCHS@GPUs$NPROC@CL$CUS_LOSS@SEED$SEED
 		export WANDB_NAME=$DIST_MODEL_FT
 		torchrun --nnodes 1 --nproc_per_node $NPROC examples/finetuning.py \
 			 --dataset gsm8k_dataset \
 			 --num_epochs $EPOCHS \
+			 --use_custom_loss $CUS_LOSS \
 			 --test_as_dev 0 \
 			 --dev_set_seed $SEED \
+			 --use_gradient_clipping $GRAD_CLIP \
+			 --gradient_clipping_thresh $GRAD_THRES \
 			 --lr $LR \
 			 --lr_scheduler $LR_SCHED \
 			 --warmup_ratio $WARM \

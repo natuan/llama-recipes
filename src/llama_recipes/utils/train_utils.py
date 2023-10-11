@@ -171,21 +171,24 @@ def train(
             dist.all_reduce(total_loss, op=dist.ReduceOp.SUM)
 
             # GSM8K
-            dist.all_reduce(total_chain_of_thought_loss, op=dist.ReduceOp.SUM)
-            dist.all_reduce(total_result_loss, op=dist.ReduceOp.SUM)
+            if train_config.use_custom_loss:
+                dist.all_reduce(total_chain_of_thought_loss, op=dist.ReduceOp.SUM)
+                dist.all_reduce(total_result_loss, op=dist.ReduceOp.SUM)
 
         train_epoch_loss = total_loss / len(train_dataloader)
 
         # GSM8K
-        train_epoch_chain_of_thought_loss = total_chain_of_thought_loss / len(train_dataloader)
-        train_epoch_result_loss = total_result_loss / len(train_dataloader)
+        if train_config.use_custom_loss:
+            train_epoch_chain_of_thought_loss = total_chain_of_thought_loss / len(train_dataloader)
+            train_epoch_result_loss = total_result_loss / len(train_dataloader)
 
         if train_config.enable_fsdp:
             train_epoch_loss = train_epoch_loss / world_size
 
             # GSM8K
-            train_epoch_chain_of_thought_loss = train_epoch_chain_of_thought_loss / world_size
-            train_epoch_result_loss = train_epoch_result_loss / world_size
+            if train_config.use_custom_loss:
+                train_epoch_chain_of_thought_loss = train_epoch_chain_of_thought_loss / world_size
+                train_epoch_result_loss = train_epoch_result_loss / world_size
 
         train_perplexity = torch.exp(train_epoch_loss)
 
@@ -193,13 +196,22 @@ def train(
         train_loss.append(train_epoch_loss)
 
         if rank == 0:
+            log_dict = {
+                "train_epoch_loss": train_epoch_loss,
+                "train_perplexity": train_perplexity,
+            }
+
+            # GSM8K
+            if train_config.use_custom_loss:
+                log_dict.update(
+                    {
+                        "train_chain_of_thought_loss": train_epoch_chain_of_thought_loss,
+                        "train_result_loss": train_epoch_result_loss,
+                    }
+                )
+
             wandb.log(
-                {
-                    "train_epoch_loss": train_epoch_loss,
-                    "train_perplexity": train_perplexity,
-                    "train_chain_of_thought_loss": train_epoch_chain_of_thought_loss,
-                    "train_result_loss": train_epoch_result_loss,
-                },
+                log_dict,
                 commit=not train_config.run_validation,
             )
 
@@ -422,22 +434,25 @@ def evaluation(model, train_config, eval_dataloader, local_rank, tokenizer):
         dist.all_reduce(eval_loss, op=dist.ReduceOp.SUM)
 
         # GSM8K
-        dist.all_reduce(eval_chain_of_thought_loss, op=dist.ReduceOp.SUM)
-        dist.all_reduce(eval_result_loss, op=dist.ReduceOp.SUM)
+        if train_config.use_custom_loss:
+            dist.all_reduce(eval_chain_of_thought_loss, op=dist.ReduceOp.SUM)
+            dist.all_reduce(eval_result_loss, op=dist.ReduceOp.SUM)
 
     # Compute average loss and perplexity
     eval_epoch_loss = eval_loss / len(eval_dataloader)
 
     # GSM8K
-    eval_epoch_chain_of_thought_loss = eval_chain_of_thought_loss / len(eval_dataloader)
-    eval_epoch_result_loss = eval_result_loss / len(eval_dataloader)
+    if train_config.use_custom_loss:
+        eval_epoch_chain_of_thought_loss = eval_chain_of_thought_loss / len(eval_dataloader)
+        eval_epoch_result_loss = eval_result_loss / len(eval_dataloader)
 
     if train_config.enable_fsdp:
         eval_epoch_loss = eval_epoch_loss / world_size
 
         # GSM8K
-        eval_epoch_chain_of_thought_loss = eval_epoch_chain_of_thought_loss / world_size
-        eval_epoch_result_loss = eval_epoch_result_loss / world_size
+        if train_config.use_custom_loss:
+            eval_epoch_chain_of_thought_loss = eval_epoch_chain_of_thought_loss / world_size
+            eval_epoch_result_loss = eval_epoch_result_loss / world_size
 
     eval_ppl = torch.exp(eval_epoch_loss)
 
@@ -596,27 +611,27 @@ def save_train_params(train_config, fsdp_config, rank):
         if rank == 0:
             print(f"training params are saved in {file_name}")
 
-# # Support Sparse Training
-# @torch.no_grad()
-# def apply_masks(model):
-#     def mask_weights(module):
-#         if hasattr(module, 'mask'):
-#             # print("Weight shape: {}, mask shape: {}".format(module.weight.size(), module.mask.size()))
-#             module.weight *= module.mask
-#     model.apply(mask_weights)
+# Support Sparse Training
+@torch.no_grad()
+def apply_masks(model):
+    def mask_weights(module):
+        if hasattr(module, 'mask'):
+            # print("Weight shape: {}, mask shape: {}".format(module.weight.size(), module.mask.size()))
+            module.weight *= module.mask
+    model.apply(mask_weights)
 
 
-# def attach_masks(model, to_layer=torch.nn.Linear, debug=False):
-#     for name, module in model.named_children():
-#         # we should make this more specific to avoid masking of unpruned layers
-#         # e.g.: project_in and project_out in OPT models
-#         if isinstance(module, to_layer):
-#             ## Only for debugging purposes, set sparsity to 10%
-#             # module.weight.data[torch.rand_like(module.weight) < 0.10] = 0
+def attach_masks(model, to_layer=torch.nn.Linear, debug=False):
+    for name, module in model.named_children():
+        # we should make this more specific to avoid masking of unpruned layers
+        # e.g.: project_in and project_out in OPT models
+        if isinstance(module, to_layer):
+            # Only for debugging purposes, set sparsity to 10%
+            # module.weight.data[torch.rand_like(module.weight) < 0.10] = 0
 
-#             mask = torch.where(module.weight == 0, torch.tensor(0, dtype=torch.uint8), torch.tensor(1, dtype=torch.uint8))
-#             module.register_buffer("mask", mask, persistent=False)
-#             if debug:
-#                 print(f"[Debugging] attaching mask to {name} with sparsity = {torch.sum(mask == 0)/mask.numel()}")
-#         else:
-#             attach_masks(module, to_layer)
+            mask = torch.where(module.weight == 0, torch.tensor(0, dtype=torch.uint8), torch.tensor(1, dtype=torch.uint8))
+            module.register_buffer("mask", mask, persistent=False)
+            if debug:
+                print(f"[Debugging] attaching mask to {name} with sparsity = {torch.sum(mask == 0)/mask.numel()}")
+        else:
+            attach_masks(module, to_layer)

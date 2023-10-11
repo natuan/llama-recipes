@@ -19,13 +19,15 @@ class train_config:
     num_workers_dataloader: int = 1
     lr: float = 1e-4
     lr_scheduler: str = "linear"
+    sparse_training: bool = False
+    sparse_ckpt: str = ""
     warmup_ratio: float = 0.1
     weight_decay: float = 0.0
     gamma: float = 0.85
     dev_set_seed: float = 2023
     test_as_dev: bool = True
     use_custom_loss: bool = False
-    result_loss_weight: float = None  # Specific for GSM8K; Todo: make this more general
+    result_loss_weight: float = 0.5  # Specific for GSM8K; Todo: make this more general
     seed: int = 42
     use_fp16: bool = False
     mixed_precision: bool = True
