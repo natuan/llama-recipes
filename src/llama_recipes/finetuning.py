@@ -94,7 +94,7 @@ def main(**kwargs):
         )
 
     dataset_config = generate_dataset_config(train_config, kwargs)
-    if train_config.use_custom_loss and dataset_config.dataset == "gsm8k_dataset":
+    if dataset_config.dataset == "gsm8k_dataset":
         register_custom_loss(
             model,
             "GSM8K_AccuracyAwareLoss",

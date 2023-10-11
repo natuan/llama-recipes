@@ -21,14 +21,14 @@ BS=8
 
 EPOCHS=3
 
-for SEED in 53 1223 241
+for SEED in 53
 do
     for LR in 1e-5
     do
 	for GRAD_ACC in 1 2
 	do
 	    export WANDB_RUN_GROUP="Custom vs Original Loss (Dev from Train) - Epochs $EPOCHS, LR $LR, Batch $BS, GradAccum $GRAD_ACC"
-	    for CUS_LOSS in 1 0
+	    for CUS_LOSS in 0
 	    do
 		DIST_MODEL_FT=$MODEL_NAME@gsm8k@lr$LR@B$BS@W$WARM@ep$EPOCHS@GPUs$NPROC@CL$CUS_LOSS@SEED$SEED
 		export WANDB_NAME=$DIST_MODEL_FT

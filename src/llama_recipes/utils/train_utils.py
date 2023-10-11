@@ -86,9 +86,8 @@ def train(
             total_loss = 0.0
 
             # GSM8K: Two specific losses from answers
-            if train_config.use_custom_loss:
-                total_chain_of_thought_loss = 0.0
-                total_result_loss = 0.0
+            total_chain_of_thought_loss = 0.0
+            total_result_loss = 0.0
 
             total_length = len(train_dataloader) // gradient_accumulation_steps
             pbar = tqdm(
@@ -104,19 +103,19 @@ def train(
                     else:
                         batch[key] = batch[key].to("cuda:0")
                 all_losses = model(**batch).loss
-                loss = (
-                    all_losses["loss"] if isinstance(all_losses, Dict) else all_losses
-                )
+                assert isinstance(all_losses, Dict)
+                if train_config.use_custom_loss:
+                    loss = all_losses["custom_loss"]
+                else:
+                    loss = all_losses["loss"]
                 loss = loss / gradient_accumulation_steps
                 total_loss += loss.detach().float()
 
                 # GSM8K
-                if train_config.use_custom_loss:
-                    assert isinstance(all_losses, Dict)
-                    chain_of_thought_loss = all_losses["chain_of_thoughts_loss"] / gradient_accumulation_steps
-                    result_loss = all_losses["result_loss"] / gradient_accumulation_steps
-                    total_chain_of_thought_loss += chain_of_thought_loss.detach().float()
-                    total_result_loss += result_loss.detach().float()
+                chain_of_thought_loss = all_losses["chain_of_thoughts_loss"] / gradient_accumulation_steps
+                result_loss = all_losses["result_loss"] / gradient_accumulation_steps
+                total_chain_of_thought_loss += chain_of_thought_loss.detach().float()
+                total_result_loss += result_loss.detach().float()
 
                 if train_config.use_fp16:
                     # if fp16 is enabled, use gradient scaler to handle gradient update
@@ -171,24 +170,21 @@ def train(
             dist.all_reduce(total_loss, op=dist.ReduceOp.SUM)
 
             # GSM8K
-            if train_config.use_custom_loss:
-                dist.all_reduce(total_chain_of_thought_loss, op=dist.ReduceOp.SUM)
-                dist.all_reduce(total_result_loss, op=dist.ReduceOp.SUM)
+            dist.all_reduce(total_chain_of_thought_loss, op=dist.ReduceOp.SUM)
+            dist.all_reduce(total_result_loss, op=dist.ReduceOp.SUM)
 
         train_epoch_loss = total_loss / len(train_dataloader)
 
         # GSM8K
-        if train_config.use_custom_loss:
-            train_epoch_chain_of_thought_loss = total_chain_of_thought_loss / len(train_dataloader)
-            train_epoch_result_loss = total_result_loss / len(train_dataloader)
+        train_epoch_chain_of_thought_loss = total_chain_of_thought_loss / len(train_dataloader)
+        train_epoch_result_loss = total_result_loss / len(train_dataloader)
 
         if train_config.enable_fsdp:
             train_epoch_loss = train_epoch_loss / world_size
 
             # GSM8K
-            if train_config.use_custom_loss:
-                train_epoch_chain_of_thought_loss = train_epoch_chain_of_thought_loss / world_size
-                train_epoch_result_loss = train_epoch_result_loss / world_size
+            train_epoch_chain_of_thought_loss = train_epoch_chain_of_thought_loss / world_size
+            train_epoch_result_loss = train_epoch_result_loss / world_size
 
         train_perplexity = torch.exp(train_epoch_loss)
 
@@ -202,13 +198,12 @@ def train(
             }
 
             # GSM8K
-            if train_config.use_custom_loss:
-                log_dict.update(
-                    {
-                        "train_chain_of_thought_loss": train_epoch_chain_of_thought_loss,
-                        "train_result_loss": train_epoch_result_loss,
-                    }
-                )
+            log_dict.update(
+                {
+                    "train_chain_of_thought_loss": train_epoch_chain_of_thought_loss,
+                    "train_result_loss": train_epoch_result_loss,
+                }
+            )
 
             wandb.log(
                 log_dict,
@@ -238,14 +233,9 @@ def train(
         # lr_scheduler.step()
 
         if train_config.run_validation:
-            if train_config.use_custom_loss:
-                eval_ppl, eval_epoch_loss, eval_epoch_chain_of_thought_loss, eval_epoch_result_loss = evaluation(
-                    model, train_config, eval_dataloader, local_rank, tokenizer
-                )
-            else:
-                eval_ppl, eval_epoch_loss = evaluation(
-                    model, train_config, eval_dataloader, local_rank, tokenizer
-                )
+            eval_ppl, eval_epoch_loss, eval_epoch_chain_of_thought_loss, eval_epoch_result_loss = evaluation(
+                model, train_config, eval_dataloader, local_rank, tokenizer
+            )
             checkpoint_start_time = time.perf_counter()
             if train_config.save_model and eval_epoch_loss < best_val_loss:
                 if train_config.enable_fsdp:
@@ -320,13 +310,21 @@ def train(
             val_prep.append(eval_ppl)
 
             if rank == 0:
-                wandb.log(
+                log_dict = {
+                    "eval_epoch_loss": eval_epoch_loss,
+                    "eval_perplexity": eval_ppl,
+                }
+                
+                # GSM8K
+                log_dict.update(
                     {
-                        "eval_epoch_loss": eval_epoch_loss,
-                        "eval_perplexity": eval_ppl,
                         "eval_epoch_chain_of_thought_loss": eval_epoch_chain_of_thought_loss,
                         "eval_epoch_result_loss": eval_epoch_result_loss,
-                    },
+                    }
+                )
+                
+                wandb.log(
+                    log_dict,
                     commit=True,
                 )
 
@@ -385,9 +383,8 @@ def evaluation(model, train_config, eval_dataloader, local_rank, tokenizer):
     eval_loss = 0.0  # Initialize evaluation loss
 
     # GSM8K: Two specific losses from answers
-    if train_config.use_custom_loss:
-        eval_chain_of_thought_loss = 0.0
-        eval_result_loss = 0.0
+    eval_chain_of_thought_loss = 0.0
+    eval_result_loss = 0.0
 
     with MemoryTrace() as memtrace:
         for step, batch in enumerate(
@@ -408,18 +405,19 @@ def evaluation(model, train_config, eval_dataloader, local_rank, tokenizer):
                 # Forward pass and compute loss
                 outputs = model(**batch)
                 all_losses = outputs.loss
-                loss = (
-                    all_losses["loss"] if isinstance(all_losses, Dict) else all_losses
-                )
+                assert isinstance(all_losses, Dict)
+                if train_config.use_custom_loss:
+                    loss = all_losses["custom_loss"]
+                else:
+                    loss = all_losses["loss"]
                 eval_loss += loss.detach().float()
 
                 # GSM8K
-                if train_config.use_custom_loss:
-                    assert isinstance(all_losses, Dict)
-                    chain_of_thought_loss = all_losses["chain_of_thoughts_loss"]
-                    result_loss = all_losses["result_loss"]
-                    eval_chain_of_thought_loss += chain_of_thought_loss.detach().float()
-                    eval_result_loss += result_loss.detach().float()
+                assert isinstance(all_losses, Dict)
+                chain_of_thought_loss = all_losses["chain_of_thoughts_loss"]
+                result_loss = all_losses["result_loss"]
+                eval_chain_of_thought_loss += chain_of_thought_loss.detach().float()
+                eval_result_loss += result_loss.detach().float()
 
             # Decode predictions and add to evaluation predictions list
             preds = torch.argmax(outputs.logits, -1)
@@ -434,25 +432,22 @@ def evaluation(model, train_config, eval_dataloader, local_rank, tokenizer):
         dist.all_reduce(eval_loss, op=dist.ReduceOp.SUM)
 
         # GSM8K
-        if train_config.use_custom_loss:
-            dist.all_reduce(eval_chain_of_thought_loss, op=dist.ReduceOp.SUM)
-            dist.all_reduce(eval_result_loss, op=dist.ReduceOp.SUM)
+        dist.all_reduce(eval_chain_of_thought_loss, op=dist.ReduceOp.SUM)
+        dist.all_reduce(eval_result_loss, op=dist.ReduceOp.SUM)
 
     # Compute average loss and perplexity
     eval_epoch_loss = eval_loss / len(eval_dataloader)
 
     # GSM8K
-    if train_config.use_custom_loss:
-        eval_epoch_chain_of_thought_loss = eval_chain_of_thought_loss / len(eval_dataloader)
-        eval_epoch_result_loss = eval_result_loss / len(eval_dataloader)
+    eval_epoch_chain_of_thought_loss = eval_chain_of_thought_loss / len(eval_dataloader)
+    eval_epoch_result_loss = eval_result_loss / len(eval_dataloader)
 
     if train_config.enable_fsdp:
         eval_epoch_loss = eval_epoch_loss / world_size
 
         # GSM8K
-        if train_config.use_custom_loss:
-            eval_epoch_chain_of_thought_loss = eval_epoch_chain_of_thought_loss / world_size
-            eval_epoch_result_loss = eval_epoch_result_loss / world_size
+        eval_epoch_chain_of_thought_loss = eval_epoch_chain_of_thought_loss / world_size
+        eval_epoch_result_loss = eval_epoch_result_loss / world_size
 
     eval_ppl = torch.exp(eval_epoch_loss)
 
@@ -463,10 +458,7 @@ def evaluation(model, train_config, eval_dataloader, local_rank, tokenizer):
     else:
         print(f" {eval_ppl=} {eval_epoch_loss=}")
 
-    if train_config.use_custom_loss:
-        return eval_ppl, eval_epoch_loss, eval_epoch_chain_of_thought_loss, eval_epoch_result_loss
-    else:
-        return eval_ppl, eval_epoch_loss
+    return eval_ppl, eval_epoch_loss, eval_epoch_chain_of_thought_loss, eval_epoch_result_loss
 
 
 def freeze_transformer_layers(model, num_layer):

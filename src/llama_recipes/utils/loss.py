@@ -25,24 +25,26 @@ class GSM8K_AccuracyAwareLoss(Module):
         self.result_loss_weight = result_loss_weight
 
     def forward(self, logits: Tensor, labels: Tensor, **kwargs) -> Tensor:
-        result_mask = kwargs.get("result_mask", None)
-        if result_mask is None:
-            loss = self._cross_entropy_loss(logits, labels)
-        else:
-            result_labels = copy.deepcopy(labels)
-            result_labels[~result_mask] = -100  # Ignored by CE loss
-            result_loss = self._cross_entropy_loss(logits, result_labels)
+        loss = self._cross_entropy_loss(logits, labels)
+        if "result_mask" not in kwargs:
+            raise RuntimeError("Checking tokenization: result_mask must be computed")
+        result_mask = kwargs["result_mask"]
 
-            chain_of_thoughts_labels = copy.deepcopy(labels)
-            chain_of_thoughts_labels[result_mask] = -100  # Ignored by CE loss
-            chain_of_thoughts_loss = self._cross_entropy_loss(logits, chain_of_thoughts_labels)
+        result_labels = copy.deepcopy(labels)
+        result_labels[~result_mask] = -100  # Ignored by CE loss
+        result_loss = self._cross_entropy_loss(logits, result_labels)
 
-            total_loss = result_loss * self.result_loss_weight + chain_of_thoughts_loss * (1.0 - self.result_loss_weight)
-            loss = {
-                "result_loss": result_loss,
-                "chain_of_thoughts_loss": chain_of_thoughts_loss,
-                "loss": total_loss
-            }
+        chain_of_thoughts_labels = copy.deepcopy(labels)
+        chain_of_thoughts_labels[result_mask] = -100  # Ignored by CE loss
+        chain_of_thoughts_loss = self._cross_entropy_loss(logits, chain_of_thoughts_labels)
+
+        custom_loss = result_loss * self.result_loss_weight + chain_of_thoughts_loss * (1.0 - self.result_loss_weight)
+        loss = {
+            "result_loss": result_loss,
+            "chain_of_thoughts_loss": chain_of_thoughts_loss,
+            "custom_loss": custom_loss,
+            "loss": loss,
+        }
         return loss
 
     def _cross_entropy_loss(self, logits, labels):
