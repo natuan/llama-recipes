@@ -44,8 +44,10 @@ def train(
     gradient_accumulation_steps,
     train_config,
     fsdp_config=None,
+    kd_config=None,
     local_rank=None,
     rank=None,
+    teacher=None,
 ):
     """
     Trains the model on the given dataloader
@@ -102,17 +104,29 @@ def train(
                         batch[key] = batch[key].to(local_rank)
                     else:
                         batch[key] = batch[key].to("cuda:0")
-                all_losses = model(**batch).loss
+                model_outputs = model(**batch)
+                all_losses = model_outputs.loss
                 assert isinstance(all_losses, Dict)
                 if train_config.use_custom_loss:
                     loss = all_losses["custom_loss"]
                 else:
                     loss = all_losses["loss"]
+
+                # Weighted KD loss
+                kd_loss = (
+                    _compute_kd_loss(model_outputs, teacher, kd_config)
+                    if teacher is not None
+                    else 0.0
+                )
+
+                loss = kd_config.hardness_ce * loss + kd_loss
                 loss = loss / gradient_accumulation_steps
                 total_loss += loss.detach().float()
 
                 # GSM8K
-                chain_of_thought_loss = all_losses["chain_of_thoughts_loss"] / gradient_accumulation_steps
+                chain_of_thought_loss = (
+                    all_losses["chain_of_thoughts_loss"] / gradient_accumulation_steps
+                )
                 result_loss = all_losses["result_loss"] / gradient_accumulation_steps
                 total_chain_of_thought_loss += chain_of_thought_loss.detach().float()
                 total_result_loss += result_loss.detach().float()
@@ -176,14 +190,18 @@ def train(
         train_epoch_loss = total_loss / len(train_dataloader)
 
         # GSM8K
-        train_epoch_chain_of_thought_loss = total_chain_of_thought_loss / len(train_dataloader)
+        train_epoch_chain_of_thought_loss = total_chain_of_thought_loss / len(
+            train_dataloader
+        )
         train_epoch_result_loss = total_result_loss / len(train_dataloader)
 
         if train_config.enable_fsdp:
             train_epoch_loss = train_epoch_loss / world_size
 
             # GSM8K
-            train_epoch_chain_of_thought_loss = train_epoch_chain_of_thought_loss / world_size
+            train_epoch_chain_of_thought_loss = (
+                train_epoch_chain_of_thought_loss / world_size
+            )
             train_epoch_result_loss = train_epoch_result_loss / world_size
 
         train_perplexity = torch.exp(train_epoch_loss)
@@ -233,9 +251,12 @@ def train(
         # lr_scheduler.step()
 
         if train_config.run_validation:
-            eval_ppl, eval_epoch_loss, eval_epoch_chain_of_thought_loss, eval_epoch_result_loss = evaluation(
-                model, train_config, eval_dataloader, local_rank, tokenizer
-            )
+            (
+                eval_ppl,
+                eval_epoch_loss,
+                eval_epoch_chain_of_thought_loss,
+                eval_epoch_result_loss,
+            ) = evaluation(model, train_config, eval_dataloader, local_rank, tokenizer)
             checkpoint_start_time = time.perf_counter()
             if train_config.save_model and eval_epoch_loss < best_val_loss:
                 if train_config.enable_fsdp:
@@ -314,7 +335,7 @@ def train(
                     "eval_epoch_loss": eval_epoch_loss,
                     "eval_perplexity": eval_ppl,
                 }
-                
+
                 # GSM8K
                 log_dict.update(
                     {
@@ -322,7 +343,7 @@ def train(
                         "eval_epoch_result_loss": eval_epoch_result_loss,
                     }
                 )
-                
+
                 wandb.log(
                     log_dict,
                     commit=True,
@@ -458,7 +479,12 @@ def evaluation(model, train_config, eval_dataloader, local_rank, tokenizer):
     else:
         print(f" {eval_ppl=} {eval_epoch_loss=}")
 
-    return eval_ppl, eval_epoch_loss, eval_epoch_chain_of_thought_loss, eval_epoch_result_loss
+    return (
+        eval_ppl,
+        eval_epoch_loss,
+        eval_epoch_chain_of_thought_loss,
+        eval_epoch_result_loss,
+    )
 
 
 def freeze_transformer_layers(model, num_layer):
@@ -603,13 +629,15 @@ def save_train_params(train_config, fsdp_config, rank):
         if rank == 0:
             print(f"training params are saved in {file_name}")
 
+
 # Support Sparse Training
 @torch.no_grad()
 def apply_masks(model):
     def mask_weights(module):
-        if hasattr(module, 'mask'):
+        if hasattr(module, "mask"):
             # print("Weight shape: {}, mask shape: {}".format(module.weight.size(), module.mask.size()))
             module.weight *= module.mask
+
     model.apply(mask_weights)
 
 
@@ -621,9 +649,69 @@ def attach_masks(model, to_layer=torch.nn.Linear, debug=False):
             # Only for debugging purposes, set sparsity to 10%
             # module.weight.data[torch.rand_like(module.weight) < 0.10] = 0
 
-            mask = torch.where(module.weight == 0, torch.tensor(0, dtype=torch.uint8), torch.tensor(1, dtype=torch.uint8))
+            mask = torch.where(
+                module.weight == 0,
+                torch.tensor(0, dtype=torch.uint8),
+                torch.tensor(1, dtype=torch.uint8),
+            )
             module.register_buffer("mask", mask, persistent=False)
             if debug:
-                print(f"[Debugging] attaching mask to {name} with sparsity = {torch.sum(mask == 0)/mask.numel()}")
+                print(
+                    f"[Debugging] attaching mask to {name} with sparsity = {torch.sum(mask == 0)/mask.numel()}"
+                )
         else:
             attach_masks(module, to_layer)
+
+
+def _compute_kd_loss(model_inputs, model_outputs, teacher, kd_config):
+    IGNORED_INDEX = -100
+    with torch.no_grad():
+        teacher_outputs = teacher(**model_inputs)
+
+    loss_gen_tokens = model_inputs["labels"] != IGNORED_INDEX
+    teacher_logits = teacher_outputs.logits[loss_gen_tokens]
+    student_logits = model_outputs.logits[loss_gen_tokens]
+
+    kd_output_loss = kd_config.hardness_kd_out * _kldiv_loss(
+        student_logits, teacher_logits, kd_config.temperature
+    )
+    kd_loss = kd_output_loss
+
+    if kd_config.layerwise:
+        layerwise_kd_losses = []
+        nonpadding_tokens = model_inputs["attention_mask"] == 1
+        for i in range(1, len(model_outputs.hidden_states)):  # skip embedding
+            student_states = model_outputs.hidden_states[i][nonpadding_tokens]
+            teacher_states = teacher_outputs.hidden_states[i][nonpadding_tokens]
+
+            if kd_config.layerwise_loss == "mse":
+                layerwise_kd_losses.append(
+                    (student_states - teacher_states).pow(2).mean()
+                )
+            elif kd_config.layerwise_loss == "mse_normalized":
+                layerwise_kd_losses.append(
+                    (student_states - teacher_states).pow(2).mean()
+                    / teacher_states.pow(2).mean()
+                )
+            else:
+                layerwise_kd_losses.append(
+                    (student_states - teacher_states).pow(2).sum(dim=-1).sqrt().mean()
+                )
+        kd_loss += kd_config.hardness_kd_layerwise * sum(layerwise_kd_losses)
+
+    return kd_loss
+
+
+def _kldiv_loss(student_logits, teacher_logits, temperature):
+    num_tokens = student_logits.numel() / student_logits.size(-1)
+    kl_loss = (
+        F.kl_div(
+            input=F.log_softmax(student_logits / temperature, dim=-1),
+            target=F.log_softmax(teacher_logits / temperature, dim=-1),
+            log_target=True,
+            reduction="sum",
+        )
+        * (temperature**2)
+        / num_tokens
+    )
+    return kl_loss

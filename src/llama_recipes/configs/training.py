@@ -20,7 +20,6 @@ class train_config:
     lr: float = 1e-4
     lr_scheduler: str = "linear"
     sparse_training: bool = False
-    sparse_ckpt: str = ""
     warmup_ratio: float = 0.1
     weight_decay: float = 0.0
     gamma: float = 0.85
@@ -47,3 +46,15 @@ class train_config:
     dist_checkpoint_folder: str = "fine-tuned"  # will be used if using FSDP
     save_optimizer: bool = False  # will be used if using FSDP
     use_fast_kernels: bool = False  # Enable using SDPA from PyTroch Accelerated Transformers, make use Flash Attention and Xformer memory-efficient kernels
+
+
+@dataclass
+class kd_config:
+    teacher_model_path: str = None
+    layerwise: bool = False
+    layerwise_loss: str = "mse_normalized"
+    temperature: float = 1.0
+    # loss = hardness_ce x CrossEntropyLoss + hardness_kd_out x KLDivLoss + hardness_kd_layerwise x LayerwiseTokenL2Loss
+    hardness_ce: float = 1.0
+    hardness_output: float = 1.0
+    hardness_layerwise: float = 0.5

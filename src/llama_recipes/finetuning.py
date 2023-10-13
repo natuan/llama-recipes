@@ -17,7 +17,7 @@ from transformers import (LlamaConfig, LlamaForCausalLM, LlamaTokenizer,
                           default_data_collator, get_scheduler)
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer
 
-from llama_recipes.configs import fsdp_config, train_config
+from llama_recipes.configs import fsdp_config, kd_config, train_config
 from llama_recipes.policies import AnyPrecisionAdamW, apply_fsdp_checkpointing
 from llama_recipes.utils import fsdp_auto_wrap_policy
 from llama_recipes.utils.config_utils import (generate_dataset_config,
@@ -25,15 +25,15 @@ from llama_recipes.utils.config_utils import (generate_dataset_config,
                                               update_config)
 from llama_recipes.utils.dataset_utils import get_preprocessed_dataset
 from llama_recipes.utils.loss import register_custom_loss
-from llama_recipes.utils.train_utils import (clear_gpu_cache,
+from llama_recipes.utils.train_utils import (attach_masks, clear_gpu_cache,
                                              freeze_transformer_layers,
                                              get_policies, print_model_size,
-                                             setup, setup_environ_flags, train, attach_masks)
+                                             setup, setup_environ_flags, train)
 
 
 def main(**kwargs):
     # Update the configuration for the training and sharding process
-    update_config((train_config, fsdp_config), **kwargs)
+    update_config((train_config, fsdp_config, kd_config), **kwargs)
 
     # Set the seeds for reproducibility
     torch.cuda.manual_seed(train_config.seed)
@@ -137,17 +137,16 @@ def main(**kwargs):
         model = get_peft_model(model, peft_config)
         model.print_trainable_parameters()
 
-    # ============== Sparse training setup =================
+    # Set up sparse training
+    # TODO: use new SparseML integration when available
     if train_config.sparse_training:
-        if train_config.sparse_ckpt:
-            print(f"[Debugging] before FSDP is initialized, custom loading of the sparse checkpoint from {train_config.sparse_ckpt}")
-            sd = torch.load(train_config.sparse_ckpt, map_location='cpu')['state']['model']
-            sd = {key.replace('model.model.', 'model.').replace('model.lm_head.', 'lm_head.'): value for key, value in sd.items()}
-            model.load_state_dict(sd, strict=True)
-        if rank == 0:
-            for n, p in model.named_parameters():
-                print(f"[Debugging] loaded {n}, shape = {p.shape}, sparsity = {torch.sum(p == 0)/p.numel()}")
-        attach_masks(model, debug=rank==0)
+        attach_masks(model, debug=rank == 0)
+
+    # Set up distillation
+    # TODO: cross check with Eldar's
+    teacher = None
+    if kd_config.teacher_model_path is not None:
+        model, teacher = _set_up_kd(model, kd_config)
 
     # setting up FSDP if enable_fsdp is enabled
     if train_config.enable_fsdp:
@@ -180,8 +179,28 @@ def main(**kwargs):
         )
         if fsdp_config.fsdp_activation_checkpointing:
             apply_fsdp_checkpointing(model)
+
+        if teacher is not None:
+            teacher = FSDP(
+                teacher,
+                auto_wrap_policy=wrapping_policy,
+                mixed_precision=mixed_precision_policy
+                if not fsdp_config.pure_bf16
+                else None,
+                sharding_strategy=fsdp_config.sharding_strategy,
+                device_id=torch.cuda.current_device(),
+                limit_all_gathers=True,
+                sync_module_states=train_config.low_cpu_fsdp,
+                param_init_fn=lambda module: module.to_empty(
+                    device=torch.device("cuda"), recurse=False
+                )
+                if train_config.low_cpu_fsdp and rank != 0
+                else None,
+            )
     elif not train_config.quantization and not train_config.enable_fsdp:
         model.to("cuda")
+        if teacher is not None:
+            teacher.to("cuda")
 
     # Load and preprocess the dataset for training and validation
     dataset_train = get_preprocessed_dataset(
@@ -291,6 +310,21 @@ def main(**kwargs):
     )
     if not train_config.enable_fsdp or rank == 0:
         [print(f"Key: {k}, Value: {v}") for k, v in results.items()]
+
+
+def _set_up_kd(student, kd_config):
+    assert kd_config.teacher_model_path is not None and os.path.exists(
+        kd_config.teacher_model_path
+    )
+    teacher = LlamaForCausalLM.from_pretrained(
+        kd_config.teacher_model_path,
+    ).to(student.dtype)
+    if kd_config.level == "layer":
+        teacher.config.output_hidden_states = True
+        student.config.output_hidden_states = True
+    for n, p in teacher.named_parameters():
+        p.requires_grad = False
+    return student, teacher
 
 
 if __name__ == "__main__":
