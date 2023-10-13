@@ -44,9 +44,9 @@ def train(
     gradient_accumulation_steps,
     train_config,
     fsdp_config=None,
-    kd_config=None,
     local_rank=None,
     rank=None,
+    kd_config=None,
     teacher=None,
 ):
     """
@@ -145,6 +145,7 @@ def train(
                         scaler.step(optimizer)
                         scaler.update()
                         optimizer.zero_grad()
+                        lr_scheduler.step()
                         pbar.update(1)
                 else:
                     # regular backpropagation when fp16 is not used
@@ -159,9 +160,8 @@ def train(
                             )
                         optimizer.step()
                         optimizer.zero_grad()
+                        lr_scheduler.step()
                         pbar.update(1)
-
-                lr_scheduler.step()
 
                 if rank == 0:
                     commit = step < len(train_dataloader) - 1
