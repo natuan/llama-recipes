@@ -18,31 +18,29 @@ GRAD_CLIP=1
 GRAD_THRES=1.0
 
 CUS_LOSS=1
-
+WD=0.0
 BS=8
 GRAD_ACC=1
 
 EPOCHS=2
-SEED=53
 
-for WD in 0.0
+for GRAD_ACC in 1
 do
-    for LR in 3e-5
+    for LR in 3e-5 8e-6 5e-5
     do
-	for RLW in 0.01 0.3 
+	for RLW in 0.01 0.1 0.3
 	do
-	    export WANDB_RUN_GROUP="Custom Loss (Dev from Train) - Epochs $EPOCHS, LR $LR, Batch $BS, GradAccum $GRAD_ACC"
+	    export WANDB_RUN_GROUP="Custom Loss (Test as Dev) - Epochs $EPOCHS, LR $LR, Batch $BS, GradAccum $GRAD_ACC"
 	    for CUS_LOSS in 1
 	    do
-		DIST_MODEL_FT=$MODEL_NAME@gsm8k@lr$LR@B$BS@GrAcc$GRAD_ACC@W$WARM@ep$EPOCHS@GPUs$NPROC@CL$CUS_LOSS@RLW$RLW@WD$WD@SEED$SEED
+		DIST_MODEL_FT=$MODEL_NAME@gsm8k@lr$LR@B$BS@GrAcc$GRAD_ACC@W$WARM@ep$EPOCHS@GPUs$NPROC@CL$CUS_LOSS@RLW$RLW@WD$WD
 		export WANDB_NAME=$DIST_MODEL_FT
 		torchrun --nnodes 1 --nproc_per_node $NPROC examples/finetuning.py \
 			 --dataset gsm8k_dataset \
 			 --num_epochs $EPOCHS \
 			 --use_custom_loss $CUS_LOSS \
 			 --result_loss_weight $RLW \
-			 --test_as_dev 0 \
-			 --dev_set_seed $SEED \
+			 --test_as_dev 1 \
 			 --use_gradient_clipping $GRAD_CLIP \
 			 --gradient_clipping_thresh $GRAD_THRES \
 			 --weight_decay $WD \

@@ -141,7 +141,7 @@ def main(**kwargs):
     # TODO: use new SparseML integration when available
     if train_config.sparse_training:
         attach_masks(model, debug=rank == 0)
-
+    import pdb; pdb.set_trace()
     # Set up distillation
     # TODO: cross check with Eldar's
     teacher = None
@@ -321,7 +321,7 @@ def _set_up_kd(student, kd_config):
     teacher = LlamaForCausalLM.from_pretrained(
         kd_config.teacher_model_path,
     ).to(student.dtype)
-    if kd_config.level == "layer":
+    if kd_config.layerwise:
         teacher.config.output_hidden_states = True
         student.config.output_hidden_states = True
     for n, p in teacher.named_parameters():

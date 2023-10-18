@@ -8,6 +8,7 @@ from typing import Dict
 import torch
 import torch.cuda.nccl as nccl
 import torch.distributed as dist
+from torch.nn import functional as F
 import wandb
 import yaml
 from pkg_resources import packaging
@@ -111,15 +112,22 @@ def train(
                     loss = all_losses["custom_loss"]
                 else:
                     loss = all_losses["loss"]
-
                 # Weighted KD loss
-                kd_loss = (
-                    _compute_kd_loss(model_outputs, teacher, kd_config)
+                kd_losses = (
+                    _compute_kd_losses(batch, model_outputs, teacher, kd_config)
                     if teacher is not None
-                    else 0.0
+                    else None
                 )
 
-                loss = kd_config.hardness_ce * loss + kd_loss
+                loss = kd_config.hardness_ce * loss
+                if kd_losses is not None:
+                    kd_output_loss = kd_losses["kd_output_loss"]
+                    kd_layerwise_loss = kd_losses["kd_layerwise_loss"]
+                    if kd_output_loss is not None:
+                        loss += kd_config.hardness_output * kd_output_loss
+                    if kd_layerwise_loss is not None:
+                        loss += kd_config.hardness_layerwise * kd_layerwise_loss
+
                 loss = loss / gradient_accumulation_steps
                 total_loss += loss.detach().float()
 
@@ -159,6 +167,8 @@ def train(
                                 train_config.gradient_clipping_thresh,
                             )
                         optimizer.step()
+                        if train_config.sparse_training:
+                            apply_masks(model)
                         optimizer.zero_grad()
                         lr_scheduler.step()
                         pbar.update(1)
@@ -663,7 +673,7 @@ def attach_masks(model, to_layer=torch.nn.Linear, debug=False):
             attach_masks(module, to_layer)
 
 
-def _compute_kd_loss(model_inputs, model_outputs, teacher, kd_config):
+def _compute_kd_losses(model_inputs, model_outputs, teacher, kd_config):
     IGNORED_INDEX = -100
     with torch.no_grad():
         teacher_outputs = teacher(**model_inputs)
@@ -672,34 +682,32 @@ def _compute_kd_loss(model_inputs, model_outputs, teacher, kd_config):
     teacher_logits = teacher_outputs.logits[loss_gen_tokens]
     student_logits = model_outputs.logits[loss_gen_tokens]
 
-    kd_output_loss = kd_config.hardness_kd_out * _kldiv_loss(
+    kd_output_loss = _kldiv_loss(
         student_logits, teacher_logits, kd_config.temperature
     )
-    kd_loss = kd_output_loss
 
+    layerwise_losses = []
     if kd_config.layerwise:
-        layerwise_kd_losses = []
         nonpadding_tokens = model_inputs["attention_mask"] == 1
         for i in range(1, len(model_outputs.hidden_states)):  # skip embedding
             student_states = model_outputs.hidden_states[i][nonpadding_tokens]
             teacher_states = teacher_outputs.hidden_states[i][nonpadding_tokens]
-
             if kd_config.layerwise_loss == "mse":
-                layerwise_kd_losses.append(
+                layerwise_losses.append(
                     (student_states - teacher_states).pow(2).mean()
                 )
             elif kd_config.layerwise_loss == "mse_normalized":
-                layerwise_kd_losses.append(
+                layerwise_losses.append(
                     (student_states - teacher_states).pow(2).mean()
                     / teacher_states.pow(2).mean()
                 )
             else:
-                layerwise_kd_losses.append(
+                layerwise_losses.append(
                     (student_states - teacher_states).pow(2).sum(dim=-1).sqrt().mean()
                 )
-        kd_loss += kd_config.hardness_kd_layerwise * sum(layerwise_kd_losses)
 
-    return kd_loss
+    kd_layerwise_loss = sum(layerwise_losses) if kd_config.layerwise else None
+    return {"kd_output_loss": kd_output_loss, "kd_layerwise_loss": kd_layerwise_loss}
 
 
 def _kldiv_loss(student_logits, teacher_logits, temperature):

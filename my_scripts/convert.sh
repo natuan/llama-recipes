@@ -1,11 +1,11 @@
 #!/bin/bash
 
-MODEL_ROOT=$HOME/models/base_finetuned
-CKPT_FOLDER=$MODEL_ROOT/Llama-2-7b-hf@gsm8k@lr1e-5@B32@wd0.0@ep2
+MODEL_ROOT=$HOME/models/llama/base_finetuned
+CKPT_FOLDER=$MODEL_ROOT/Llama-2-7b-hf@gsm8k@lr3e-5@B16@GrAcc1@W0.1@ep2@GPUs8@CL1@RLW0.4@WD0.0
 SRC_MODEL_FOLDER=$MODEL_ROOT/Llama-2-7b-hf
 DST_MODEL_FOLDER=$CKPT_FOLDER/hf
 
-ROOT=/home/tuan/src/natuan/llama-recipes/src/llama_recipes
+ROOT=$HOME/src/natuan/llama-recipes/src/llama_recipes
 
 python $ROOT/inference/checkpoint_converter_fsdp_hf.py \
        --fsdp_checkpoint_path $CKPT_FOLDER \

@@ -25,6 +25,7 @@ class train_config:
     gamma: float = 0.85
     dev_set_seed: float = 2023
     test_as_dev: bool = True
+    eval_every_steps: int = None
     use_custom_loss: bool = False
     result_loss_weight: float = 0.5  # Specific for GSM8K; Todo: make this more general
     seed: int = 42

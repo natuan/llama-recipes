@@ -9,7 +9,7 @@ MODEL_DIR=$HOME/models/llama
 MODEL_NAME=Llama-2-7b-hf
 SRC_MODEL=$MODEL_DIR/$MODEL_NAME
 
-DIST_MODEL_ROOT=$MODEL_DIR/base_finetuned_search
+DIST_MODEL_ROOT=$MODEL_DIR/base_finetuned
 
 LR_SCHED=linear
 WARM=0.1
@@ -17,32 +17,28 @@ WARM=0.1
 GRAD_CLIP=1
 GRAD_THRES=1.0
 
-CUS_LOSS=1
-
-BS=8
+BS=16
 GRAD_ACC=1
 
-EPOCHS=2
-SEED=53
+WD=0.0
 
-for WD in 0.0
+for EPOCHS in 2 1
 do
     for LR in 3e-5
     do
-	for RLW in 0.01 0.3 
+	for RLW in 0.3 0.4
 	do
-	    export WANDB_RUN_GROUP="Custom Loss (Dev from Train) - Epochs $EPOCHS, LR $LR, Batch $BS, GradAccum $GRAD_ACC"
+	    export WANDB_RUN_GROUP="Full Training w/ Original Loss - Epochs $EPOCHS, LR $LR, Batch $BS, GradAccum $GRAD_ACC"
 	    for CUS_LOSS in 1
 	    do
-		DIST_MODEL_FT=$MODEL_NAME@gsm8k@lr$LR@B$BS@GrAcc$GRAD_ACC@W$WARM@ep$EPOCHS@GPUs$NPROC@CL$CUS_LOSS@RLW$RLW@WD$WD@SEED$SEED
+		DIST_MODEL_FT=$MODEL_NAME@gsm8k@lr$LR@B$BS@GrAcc$GRAD_ACC@W$WARM@ep$EPOCHS@GPUs$NPROC@CL$CUS_LOSS@RLW$RLW@WD$WD
 		export WANDB_NAME=$DIST_MODEL_FT
 		torchrun --nnodes 1 --nproc_per_node $NPROC examples/finetuning.py \
 			 --dataset gsm8k_dataset \
 			 --num_epochs $EPOCHS \
 			 --use_custom_loss $CUS_LOSS \
 			 --result_loss_weight $RLW \
-			 --test_as_dev 0 \
-			 --dev_set_seed $SEED \
+			 --test_as_dev 1 \
 			 --use_gradient_clipping $GRAD_CLIP \
 			 --gradient_clipping_thresh $GRAD_THRES \
 			 --weight_decay $WD \
@@ -56,7 +52,6 @@ do
 			 --model_name $SRC_MODEL \
 			 --dist_checkpoint_root_folder $DIST_MODEL_ROOT \
 			 --dist_checkpoint_folder $DIST_MODEL_FT
-		rm -r $DIST_MODEL_ROOT/*
 	    done
 	done
     done
