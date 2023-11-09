@@ -47,7 +47,9 @@ class train_config:
     dist_checkpoint_folder: str = "fine-tuned"  # will be used if using FSDP
     save_optimizer: bool = False  # will be used if using FSDP
     use_fast_kernels: bool = False  # Enable using SDPA from PyTroch Accelerated Transformers, make use Flash Attention and Xformer memory-efficient kernels
-
+    clip_softmax: bool = True
+    clip_softmax_upper_bound: float = 1.0
+    clip_softmax_lower_bound: float = -0.01
 
 @dataclass
 class kd_config:

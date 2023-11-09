@@ -53,7 +53,7 @@ def main(**kwargs):
     if rank == 0:
         import wandb
 
-        wandb.init(project="tuan-llama2-7b-gsm8k-custom_loss")
+        wandb.init(project="tuan-llama2-7b-gsm8k-clip-softmax")
 
     # Load the pre-trained model and setup its configuration
     use_cache = False if train_config.enable_fsdp else None
@@ -92,6 +92,11 @@ def main(**kwargs):
             device_map="auto" if train_config.quantization else None,
             use_cache=use_cache,
         )
+    # Pass some training config into model config
+    if train_config.clip_softmax:
+        model.config.clip_softmax = True
+        model.config.clip_softmax_upper_bound = train_config.clip_softmax_upper_bound
+        model.config.clip_softmax_lower_bound = train_config.clip_softmax_lower_bound
 
     dataset_config = generate_dataset_config(train_config, kwargs)
     if dataset_config.dataset == "gsm8k_dataset":
@@ -132,6 +137,14 @@ def main(**kwargs):
             "pad_token": "<PAD>",
         }
     )
+    model.resize_token_embeddings(len(tokenizer))
+    padding_idx = -1
+    model.model.embed_tokens.padding_idx = padding_idx
+    model.config.pad_token_id = padding_idx
+    with torch.no_grad():
+        embedding_dim = model.model.embed_tokens.embedding_dim
+        model.model.embed_tokens.weight[padding_idx] = torch.zeros(embedding_dim)
+
     if train_config.use_peft:
         peft_config = generate_peft_config(train_config, kwargs)
         model = get_peft_model(model, peft_config)
@@ -141,7 +154,6 @@ def main(**kwargs):
     # TODO: use new SparseML integration when available
     if train_config.sparse_training:
         attach_masks(model, debug=rank == 0)
-    import pdb; pdb.set_trace()
     # Set up distillation
     # TODO: cross check with Eldar's
     teacher = None
