@@ -14,12 +14,15 @@ from torch.distributed.fsdp import (
     ShardingStrategy
 )
 
+from clearml import Task
+
 from torch.distributed.fsdp.fully_sharded_data_parallel import CPUOffload
 from torch.optim.lr_scheduler import StepLR
 from transformers import (
     AutoTokenizer,
     LlamaForCausalLM,
     LlamaConfig,
+    get_scheduler
 )
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer
 
@@ -66,6 +69,10 @@ def setup_wandb(train_config, fsdp_config, **kwargs):
     run.config.update(fsdp_config, allow_val_change=True)
     return run
 
+def _clearml_init(train_config):
+    project = train_config.clearml_project
+    task_name = train_config.dist_checkpoint_folder
+    Task.init(project_name=project, task_name=task_name)
 
 def main(**kwargs):
     # Update the configuration for the training and sharding process
@@ -97,6 +104,8 @@ def main(**kwargs):
     if train_config.use_wandb:
         if not train_config.enable_fsdp or rank==0:
             wandb_run = setup_wandb(train_config, fsdp_config, **kwargs)
+
+    _clearml_init(train_config)
 
     # Load the pre-trained model and setup its configuration
     use_cache = False if train_config.enable_fsdp else None
@@ -201,7 +210,7 @@ def main(**kwargs):
 
     dataset_config = generate_dataset_config(train_config, kwargs)
 
-     # Load and preprocess the dataset for training and validation
+    # Load and preprocess the dataset for training and validation
     dataset_train = get_preprocessed_dataset(
         tokenizer,
         dataset_config,
@@ -262,7 +271,26 @@ def main(**kwargs):
             lr=train_config.lr,
             weight_decay=train_config.weight_decay,
         )
-    scheduler = StepLR(optimizer, step_size=1, gamma=train_config.gamma)
+
+    if train_config.lr_scheduler == "step_lr":
+        scheduler = StepLR(
+            optimizer,
+            step_size=len(train_dataloader) // train_config.gradient_accumulation_steps,
+            gamma=train_config.gamma,
+        )
+    else:
+        num_training_steps = (
+            len(train_dataloader)
+            * train_config.num_epochs
+            // train_config.gradient_accumulation_steps
+        )
+        num_warmup_steps = int(train_config.warmup_ratio * num_training_steps)
+        scheduler = get_scheduler(
+            train_config.lr_scheduler,
+            optimizer,
+            num_warmup_steps=num_warmup_steps,
+            num_training_steps=num_training_steps,
+        )
 
     # Start the training process
     results = train(

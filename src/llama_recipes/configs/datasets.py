@@ -9,8 +9,15 @@ class samsum_dataset:
     dataset: str =  "samsum_dataset"
     train_split: str = "train"
     test_split: str = "validation"
-    
-    
+
+
+@dataclass
+class gsm8k_dataset:
+    dataset: str =  "gsm8k_dataset"
+    train_split: str = "train"
+    test_split: str = "test"
+    max_seq_len: int = 512
+
 @dataclass
 class grammar_dataset:
     dataset: str = "grammar_dataset"

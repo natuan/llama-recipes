@@ -9,6 +9,7 @@ from pathlib import Path
 from pkg_resources import packaging
 from datetime import datetime
 
+from clearml import Task
 
 import torch
 import torch.cuda.nccl as nccl
@@ -18,7 +19,6 @@ from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
 from tqdm import tqdm
 from transformers import LlamaTokenizer
 import json
-
 
 from llama_recipes.model_checkpointing import save_model_checkpoint, save_model_and_optimizer_sharded, save_optimizer_checkpoint
 from llama_recipes.policies import fpSixteen,bfSixteen, get_llama_wrapper
@@ -81,6 +81,11 @@ def train(model, train_dataloader,eval_dataloader, tokenizer, optimizer, lr_sche
     best_val_loss = float("inf")
     total_train_steps = 0
     max_steps_reached = False  # Flag to indicate max training steps reached
+
+    clearml_log_every_steps = (
+        train_config.clearml_log_every_steps * gradient_accumulation_steps
+    )
+
     # Start the training loop
     for epoch in range(train_config.num_epochs):
         # stop when the maximum number of training steps is reached
@@ -94,6 +99,12 @@ def train(model, train_dataloader,eval_dataloader, tokenizer, optimizer, lr_sche
             pbar = tqdm(colour="blue", desc=f"Training Epoch: {epoch+1}", total=total_length, dynamic_ncols=True)
             for step, batch in enumerate(train_dataloader):
                 total_train_steps += 1
+
+                global_step = total_train_steps - 1
+                clearml_should_log = (
+                    global_step == 0 or (global_step + 1) % clearml_log_every_steps == 0
+                )
+
                 # stop when the maximum number of training steps is reached
                 if train_config.max_train_step > 0 and total_train_steps > train_config.max_train_step:
                     max_steps_reached = True
@@ -145,6 +156,42 @@ def train(model, train_dataloader,eval_dataloader, tokenizer, optimizer, lr_sche
                         optimizer.step()
                         optimizer.zero_grad()
                         pbar.update(1)
+                
+                if clearml_should_log:
+                    Task.current_task().get_logger().report_scalar(
+                        "learning_rate",
+                        "worker {:02d}".format(rank),
+                        value=lr_scheduler.get_lr()[0],
+                        iteration=global_step,
+                    )
+
+                    Task.current_task().get_logger().report_scalar(
+                        "train_loss",
+                        "worker {:02d}".format(rank),
+                        value=loss,
+                        iteration=global_step,
+                    )
+
+                if (
+                        train_config.run_validation and
+                        train_config.eval_every_steps is not None and
+                        step % train_config.eval_every_steps == 0
+                ):
+                    model.eval()
+                    eval_ppl, eval_epoch_loss, temp_val_loss, temp_step_perplexity = evaluation(model, train_config, eval_dataloader, local_rank, tokenizer, wandb_run)
+                    Task.current_task().get_logger().report_scalar(
+                        "eval_epoch_loss",
+                        "worker {:02d}".format(rank),
+                        value=eval_epoch_loss,
+                        iteration=global_step,
+                    )
+                    Task.current_task().get_logger().report_scalar(
+                        "eval_epoch_perplexity",
+                        "worker {:02d}".format(rank),
+                        value=eval_ppl,
+                        iteration=global_step,
+                    )
+                    model.train()
 
                 if wandb_run:
                     if not train_config.enable_fsdp or rank==0:
@@ -158,6 +205,10 @@ def train(model, train_dataloader,eval_dataloader, tokenizer, optimizer, lr_sche
 
                 if train_config.save_metrics:
                     save_to_json(metrics_filename, train_step_loss, train_loss, train_step_perplexity, train_prep, val_step_loss, val_loss, val_step_perplexity, val_prep)
+
+                # Update the learning rate as needed
+                lr_scheduler.step()
+
             pbar.close()
 
         epoch_end_time = time.perf_counter()-epoch_start_time
@@ -178,11 +229,22 @@ def train(model, train_dataloader,eval_dataloader, tokenizer, optimizer, lr_sche
         if not train_config.enable_fsdp or rank==0:
             memtrace.print_stats()
 
-        # Update the learning rate as needed
-        lr_scheduler.step()
-
         if train_config.run_validation:
             eval_ppl, eval_epoch_loss, temp_val_loss, temp_step_perplexity = evaluation(model, train_config, eval_dataloader, local_rank, tokenizer, wandb_run)
+
+            Task.current_task().get_logger().report_scalar(
+                "eval_epoch_loss",
+                "worker {:02d}".format(rank),
+                value=eval_epoch_loss,
+                iteration=global_step,
+            )
+            Task.current_task().get_logger().report_scalar(
+                "eval_epoch_perplexity",
+                "worker {:02d}".format(rank),
+                value=eval_ppl,
+                iteration=global_step,
+            )
+
             if train_config.save_metrics:
                 val_step_loss.extend(temp_val_loss)
                 val_step_perplexity.extend(temp_step_perplexity)

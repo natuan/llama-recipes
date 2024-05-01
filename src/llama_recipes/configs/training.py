@@ -22,6 +22,8 @@ class train_config:
     max_eval_step: int=0
     num_workers_dataloader: int=1
     lr: float=1e-4
+    lr_scheduler: str = "step_lr"
+    warmup_ratio: float = 0.1
     weight_decay: float=0.0
     gamma: float= 0.85
     seed: int=42
@@ -43,3 +45,6 @@ class train_config:
     use_fast_kernels: bool = False # Enable using SDPA from PyTroch Accelerated Transformers, make use Flash Attention and Xformer memory-efficient kernels
     use_wandb: bool = False # Enable wandb for experient tracking
     save_metrics: bool = False # saves training metrics to a json file for later plotting
+    clearml_log_every_steps: int = 20
+    clearml_project: str = None  # If none, set project with WANDB_PROJECT
+    eval_every_steps: int = None
