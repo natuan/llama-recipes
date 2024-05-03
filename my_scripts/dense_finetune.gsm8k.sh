@@ -25,7 +25,7 @@ VAL_BS=1
 WD=0.0
 
 GRAD_ACC=1
-for EPOCHS in 1 2
+for EPOCHS in 3 4
 do
    for LR in 1e-6 3e-6 5e-6 8e-6 1e-5 3e-5 5e-5 8e-5 1e-4 3e-4
    do
