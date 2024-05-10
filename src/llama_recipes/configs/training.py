@@ -48,3 +48,5 @@ class train_config:
     clearml_log_every_steps: int = 20
     clearml_project: str = None  # If none, set project with WANDB_PROJECT
     eval_every_steps: int = None
+    sparse: bool = False
+    sparse_ckpt: str = ""

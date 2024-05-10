@@ -14,6 +14,7 @@ from clearml import Task
 import torch
 import torch.cuda.nccl as nccl
 import torch.distributed as dist
+import torch.nn.functional as F
 from torch.distributed.fsdp import StateDictType
 from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
 from tqdm import tqdm
@@ -33,7 +34,7 @@ def set_tokenizer_params(tokenizer: LlamaTokenizer):
 def byte2mb(x):
     return int(x / 2**20)
 
-def train(model, train_dataloader,eval_dataloader, tokenizer, optimizer, lr_scheduler, gradient_accumulation_steps, train_config, fsdp_config=None, local_rank=None, rank=None, wandb_run=None):
+def train(model, train_dataloader,eval_dataloader, tokenizer, optimizer, lr_scheduler, gradient_accumulation_steps, train_config, fsdp_config=None, kd_config=None, local_rank=None, rank=None, wandb_run=None, teacher=None):
     """
     Trains the model on the given dataloader
 
@@ -124,12 +125,34 @@ def train(model, train_dataloader,eval_dataloader, tokenizer, optimizer, lr_sche
                         else:
                             batch[key] = batch[key].to('cuda:0')
                 with autocast():
-                    loss = model(**batch).loss
+                    model_outputs = model(**batch)
+                loss = model_outputs.loss
+                model_output_loss = loss
+                # Weighted KD loss
+                if kd_config is not None and kd_config.enabled:
+                    kd_losses = _compute_kd_losses(batch, model_outputs, teacher, kd_config)
+                    
+                    del model_outputs
+                    torch.cuda.empty_cache()
+
+                    loss = kd_config.hardness_ce * loss
+
+                    kd_output_loss = kd_losses["kd_output_loss"]
+                    kd_layerwise_loss = kd_losses["kd_layerwise_loss"]
+                    if kd_output_loss is not None:
+                        loss += kd_config.hardness_kd_output * kd_output_loss
+                    if kd_layerwise_loss is not None:
+                        loss += kd_config.hardness_kd_layerwise * kd_layerwise_loss
+                else:
+                    kd_losses = None
+
                 loss = loss / gradient_accumulation_steps
                 if train_config.save_metrics:
                     train_step_loss.append(loss.detach().float().item())
                     train_step_perplexity.append(float(torch.exp(loss.detach().float())))
                 total_loss += loss.detach().float()
+
+                optimizer_stepped = False
                 if train_config.use_fp16:
                     # if fp16 is enabled, use gradient scaler to handle gradient update
                     scaler.scale(loss).backward()
@@ -141,7 +164,10 @@ def train(model, train_dataloader,eval_dataloader, tokenizer, optimizer, lr_sche
                             else:
                                 torch.nn.utils.clip_grad_norm_(model.parameters(), train_config.gradient_clipping_threshold)
                         scaler.step(optimizer)
+                        optimizer_stepped = True
                         scaler.update()
+                        if train_config.sparse:
+                            apply_masks(model)
                         optimizer.zero_grad()
                         pbar.update(1)
                 else:
@@ -154,23 +180,54 @@ def train(model, train_dataloader,eval_dataloader, tokenizer, optimizer, lr_sche
                             else:
                                 torch.nn.utils.clip_grad_norm_(model.parameters(), train_config.gradient_clipping_threshold)
                         optimizer.step()
+                        optimizer_stepped = True
+                        if train_config.sparse:
+                            apply_masks(model)
                         optimizer.zero_grad()
                         pbar.update(1)
-                
-                if clearml_should_log:
+
+                if optimizer_stepped:
                     Task.current_task().get_logger().report_scalar(
                         "learning_rate",
                         "worker {:02d}".format(rank),
                         value=lr_scheduler.get_lr()[0],
                         iteration=global_step,
                     )
+                    lr_scheduler.step()
 
+                if clearml_should_log:
                     Task.current_task().get_logger().report_scalar(
                         "train_loss",
                         "worker {:02d}".format(rank),
                         value=loss,
                         iteration=global_step,
                     )
+                    Task.current_task().get_logger().report_scalar(
+                        "model_output_loss",
+                        "worker {:02d}".format(rank),
+                        value=model_output_loss,
+                        iteration=global_step,
+                    )
+                    if kd_losses is not None:
+                        Task.current_task().get_logger().report_scalar(
+                            "kd_output_loss",
+                            "worker {:02d}".format(rank),
+                            value=kd_losses["kd_output_loss"],
+                            iteration=global_step,
+                        )
+                        Task.current_task().get_logger().report_scalar(
+                            "kd_layerwise_loss",
+                            "worker {:02d}".format(rank),
+                            value=kd_losses["kd_layerwise_loss"],
+                            iteration=global_step,
+                        )                
+                # Clean losses and model outputs
+                loss_v = loss.detach().float()
+                del loss
+                del model_output_loss
+                if kd_losses is not None:
+                    del kd_losses
+                torch.cuda.empty_cache()
 
                 if (
                         train_config.run_validation and
@@ -191,6 +248,12 @@ def train(model, train_dataloader,eval_dataloader, tokenizer, optimizer, lr_sche
                         value=eval_ppl,
                         iteration=global_step,
                     )
+                    del eval_ppl
+                    del eval_epoch_loss
+                    del temp_val_loss
+                    del temp_step_perplexity
+                    torch.cuda.empty_cache()
+
                     model.train()
 
                 if wandb_run:
@@ -201,13 +264,10 @@ def train(model, train_dataloader,eval_dataloader, tokenizer, optimizer, lr_sche
                             'train/loss': loss.detach().float(),
                         })
 
-                pbar.set_description(f"Training Epoch: {epoch+1}/{train_config.num_epochs}, step {step}/{len(train_dataloader)} completed (loss: {loss.detach().float()})")
+                pbar.set_description(f"Training Epoch: {epoch+1}/{train_config.num_epochs}, step {step}/{len(train_dataloader)} completed (loss: {loss_v})")
 
                 if train_config.save_metrics:
                     save_to_json(metrics_filename, train_step_loss, train_loss, train_step_perplexity, train_prep, val_step_loss, val_loss, val_step_perplexity, val_prep)
-
-                # Update the learning rate as needed
-                lr_scheduler.step()
 
             pbar.close()
 
@@ -575,3 +635,84 @@ def save_to_json(output_filename, train_step_loss, train_epoch_loss, train_step_
     }
     with open(output_filename, "w") as f:
         json.dump(metrics_data, f)
+
+@torch.no_grad()
+def apply_masks(model):
+    def mask_weights(module):
+        if hasattr(module, "mask"):
+            # print("Weight shape: {}, mask shape: {}".format(module.weight.size(), module.mask.size()))
+            module.weight *= module.mask
+
+    model.apply(mask_weights)
+
+
+def attach_masks(model, to_layer=torch.nn.Linear, debug=False):
+    for name, module in model.named_children():
+        # we should make this more specific to avoid masking of unpruned layers
+        # e.g.: project_in and project_out in OPT models
+        if isinstance(module, to_layer):
+            ## Only for debugging purposes, set sparsity to 10%
+            # module.weight.data[torch.rand_like(module.weight) < 0.10] = 0
+
+            mask = torch.where(
+                module.weight == 0,
+                torch.tensor(0, dtype=torch.uint8),
+                torch.tensor(1, dtype=torch.uint8),
+            )
+            module.register_buffer("mask", mask, persistent=False)
+            if debug:
+                print(
+                    f"[Debugging] attaching mask to {name} with sparsity = {torch.sum(mask == 0)/mask.numel()}"
+                )
+        else:
+            attach_masks(module, to_layer)
+
+def _compute_kd_losses(model_inputs, model_outputs, teacher, kd_config):
+    with torch.no_grad():
+        teacher_outputs = teacher(**model_inputs)
+
+    if kd_config.output:
+        kd_output_loss = _kldiv_loss(model_outputs.logits, teacher_outputs.logits, kd_config.temperature)
+    else:
+        kd_output_loss = None
+
+    if kd_config.layerwise:
+        layerwise_losses = []
+        nonpadding_tokens = model_inputs["attention_mask"] == 1
+        for i in range(1, len(model_outputs.hidden_states)):  # skip embedding
+            student_states = model_outputs.hidden_states[i][nonpadding_tokens]
+            teacher_states = teacher_outputs.hidden_states[i][nonpadding_tokens]
+            if kd_config.layerwise_loss == "mse":
+                layerwise_losses.append((student_states - teacher_states).pow(2).mean())
+            elif kd_config.layerwise_loss == "mse_normalized":
+                layerwise_losses.append(
+                    (student_states - teacher_states).pow(2).mean()
+                    / teacher_states.pow(2).mean()
+                )
+            else:
+                layerwise_losses.append(
+                    (student_states - teacher_states).pow(2).sum(dim=-1).sqrt().mean()
+                )
+        kd_layerwise_loss = sum(layerwise_losses)
+    else:
+        kd_layerwise_loss = None
+
+    del teacher_outputs
+    torch.cuda.empty_cache()
+
+    return {"kd_output_loss": kd_output_loss, "kd_layerwise_loss": kd_layerwise_loss}
+
+
+def _kldiv_loss(student_logits, teacher_logits, temperature):
+    num_tokens = student_logits.numel() / student_logits.size(-1)
+    kl_loss = (
+        F.kl_div(
+            input=F.log_softmax(student_logits / temperature, dim=-1),
+            target=F.log_softmax(teacher_logits / temperature, dim=-1),
+            log_target=True,
+            reduction="sum",
+        )
+        * (temperature**2)
+        / num_tokens
+    )
+    return kl_loss

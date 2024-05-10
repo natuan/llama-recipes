@@ -19,6 +19,14 @@ class gsm8k_dataset:
     max_seq_len: int = 512
 
 @dataclass
+class gsm8k_v2_dataset:
+    dataset: str =  "gsm8k_v2_dataset"
+    train_split: str = "train"
+    test_split: str = "test"
+    max_seq_len: int = 512
+
+
+@dataclass
 class grammar_dataset:
     dataset: str = "grammar_dataset"
     train_split: str = "src/llama_recipes/datasets/grammar_dataset/gtrain_10k.csv" 

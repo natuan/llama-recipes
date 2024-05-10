@@ -28,6 +28,7 @@ from transformers.models.llama.modeling_llama import LlamaDecoderLayer
 
 from llama_recipes.configs import fsdp_config as FSDP_CONFIG
 from llama_recipes.configs import train_config as TRAIN_CONFIG
+from llama_recipes.configs import kd_config as KD_CONFIG
 from llama_recipes.data.concatenator import ConcatDataset
 from llama_recipes.policies import AnyPrecisionAdamW, apply_fsdp_checkpointing
 
@@ -50,6 +51,8 @@ from llama_recipes.utils.train_utils import (
     print_model_size,
     get_policies,
 )
+from llama_recipes.utils.masks import attach_masks
+
 from accelerate.utils import is_xpu_available
 
 def setup_wandb(train_config, fsdp_config, **kwargs):
@@ -76,8 +79,8 @@ def _clearml_init(train_config):
 
 def main(**kwargs):
     # Update the configuration for the training and sharding process
-    train_config, fsdp_config = TRAIN_CONFIG(), FSDP_CONFIG()
-    update_config((train_config, fsdp_config), **kwargs)
+    train_config, fsdp_config, kd_config = TRAIN_CONFIG(), FSDP_CONFIG(), KD_CONFIG()
+    update_config((train_config, fsdp_config, kd_config), **kwargs)
     # Set the seeds for reproducibility
     if is_xpu_available():
         torch.xpu.manual_seed(train_config.seed)
@@ -90,6 +93,8 @@ def main(**kwargs):
         local_rank = int(os.environ["LOCAL_RANK"])
         rank = int(os.environ["RANK"])
         world_size = int(os.environ["WORLD_SIZE"])
+
+    main_process = (not train_config.enable_fsdp) or rank == 0
 
     if torch.distributed.is_initialized():
         if is_xpu_available():
@@ -155,7 +160,6 @@ def main(**kwargs):
     if train_config.quantization:
         model = prepare_model_for_kbit_training(model)
 
-    import pdb; pdb.set_trace()
     # Convert the model to bfloat16 if fsdp and pure_bf16 is enabled
     if train_config.enable_fsdp and fsdp_config.pure_bf16:
         model.to(torch.bfloat16)
@@ -167,6 +171,47 @@ def main(**kwargs):
         if wandb_run:
             wandb_run.config.update(peft_config)
 
+    # ============== Sparse training setup =================
+    if train_config.sparse:
+        if train_config.sparse_ckpt:
+            if main_process:
+                print(
+                    f"[Debugging] before FSDP is initialized, custom loading of the sparse checkpoint from {train_config.sparse_ckpt}"
+                )
+            sd = torch.load(train_config.sparse_ckpt, map_location="cpu")["state"][
+                "model"
+            ]
+            sd = {
+                key.replace("model.model.", "model.").replace(
+                    "model.lm_head.", "lm_head."
+                ): value
+                for key, value in sd.items()
+            }
+            model.load_state_dict(sd, strict=True)
+        if main_process:
+            for n, p in model.named_parameters():
+                print(
+                    f"[Debugging] loaded {n}, shape = {p.shape}, sparsity = {torch.sum(p == 0)/p.numel()}"
+                )
+        attach_masks(model, debug=main_process)
+
+    if kd_config.enabled:
+        assert kd_config.teacher_model_path is not None and os.path.exists(
+            kd_config.teacher_model_path
+        )
+        teacher = LlamaForCausalLM.from_pretrained(
+            kd_config.teacher_model_path,
+        ).to(model.dtype)
+        teacher.resize_token_embeddings(len(tokenizer))
+        if kd_config.layerwise:
+            # get intermediate outputs in case of layer KD
+            teacher.config.output_hidden_states = True
+            model.config.output_hidden_states = True
+        for n, p in teacher.named_parameters():
+            p.requires_grad = False
+    else:
+        teacher = None
+    # =======================================================
 
     hsdp_device_mesh = None
     if fsdp_config.hsdp and fsdp_config.sharding_strategy == ShardingStrategy.HYBRID_SHARD:
@@ -199,7 +244,7 @@ def main(**kwargs):
             limit_all_gathers=True,
             sync_module_states=train_config.low_cpu_fsdp,
             param_init_fn=lambda module: module.to_empty(device=torch.device("cuda"), recurse=False)
-            if train_config.low_cpu_fsdp and rank != 0 else None,
+            if train_config.low_cpu_fsdp and not main_process else None,
         )
         if fsdp_config.fsdp_activation_checkpointing:
             apply_fsdp_checkpointing(model)
@@ -208,6 +253,27 @@ def main(**kwargs):
             model.to("xpu:0")
         elif torch.cuda.is_available():
             model.to("cuda")
+
+    if kd_config.enabled:
+        if kd_config.enable_fsdp:
+            teacher = FSDP(
+                teacher,
+                auto_wrap_policy=wrapping_policy,
+                mixed_precision=mixed_precision_policy
+                if not fsdp_config.pure_bf16
+                else None,
+                sharding_strategy=fsdp_config.sharding_strategy,
+                device_id=torch.cuda.current_device(),
+                limit_all_gathers=True,
+                sync_module_states=train_config.low_cpu_fsdp,
+                param_init_fn=lambda module: module.to_empty(
+                    device=torch.device("cuda"), recurse=False
+                )
+                if train_config.low_cpu_fsdp and not main_process
+                else None,
+            )
+        else:
+            teacher.to("cuda")
 
     dataset_config = generate_dataset_config(train_config, kwargs)
 
@@ -304,9 +370,11 @@ def main(**kwargs):
         train_config.gradient_accumulation_steps,
         train_config,
         fsdp_config=fsdp_config if train_config.enable_fsdp else None,
+        kd_config=kd_config if kd_config.enabled else None,
         local_rank=local_rank if train_config.enable_fsdp else None,
         rank=rank if train_config.enable_fsdp else None,
         wandb_run=wandb_run,
+        teacher=teacher,
     )
     if not train_config.enable_fsdp or rank==0:
         [print(f'Key: {k}, Value: {v}') for k, v in results.items()]
