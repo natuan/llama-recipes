@@ -155,7 +155,6 @@ def main(**kwargs):
     if train_config.quantization:
         model = prepare_model_for_kbit_training(model)
 
-    import pdb; pdb.set_trace()
     # Convert the model to bfloat16 if fsdp and pure_bf16 is enabled
     if train_config.enable_fsdp and fsdp_config.pure_bf16:
         model.to(torch.bfloat16)
@@ -166,7 +165,6 @@ def main(**kwargs):
         model.print_trainable_parameters()
         if wandb_run:
             wandb_run.config.update(peft_config)
-
 
     hsdp_device_mesh = None
     if fsdp_config.hsdp and fsdp_config.sharding_strategy == ShardingStrategy.HYBRID_SHARD:

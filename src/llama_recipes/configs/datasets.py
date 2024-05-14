@@ -47,3 +47,12 @@ class custom_dataset:
     file: str = "examples/custom_dataset.py"
     train_split: str = "train"
     test_split: str = "validation"
+
+@dataclass
+class cnn_dailymail_dataset:
+    dataset: str = "cnn_dailymail"
+    subset: str = "3.0.0"
+    max_seq_len: int = 2048
+    train_split: str = "train"
+    val_split: str = "validation"
+    test_split: str = "test"

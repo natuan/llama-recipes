@@ -13,6 +13,7 @@ from llama_recipes.datasets import (
     get_samsum_dataset,
     get_gsm8k_dataset,
     get_gsm8k_v2_dataset,
+    get_cnn_dailymail_dataset
 )
 
 
@@ -58,6 +59,7 @@ DATASET_PREPROC = {
     "custom_dataset": get_custom_dataset,
     "gsm8k_dataset": get_gsm8k_dataset,
     "gsm8k_v2_dataset": get_gsm8k_v2_dataset,
+    "cnn_dailymail_dataset": get_cnn_dailymail_dataset,
 }
 
 

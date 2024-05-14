@@ -6,3 +6,4 @@ from llama_recipes.datasets.alpaca_dataset import InstructionDataset as get_alpa
 from llama_recipes.datasets.samsum_dataset import get_preprocessed_samsum as get_samsum_dataset
 from llama_recipes.datasets.gsm8k_dataset import get_preprocessed_gsm8k as get_gsm8k_dataset
 from llama_recipes.datasets.gsm8k_dataset_v2 import get_preprocessed_gsm8k_v2 as get_gsm8k_v2_dataset
+from llama_recipes.datasets.cnn_dailymail_dataset import get_preprocessed_cnn_dailymail as get_cnn_dailymail_dataset
